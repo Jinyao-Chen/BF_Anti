@@ -275,6 +275,24 @@ def main():
     p.add_argument("--base-throttle", type=int, default=1100,
                    help="Base throttle for tracking (default: 1100 bench, ~1550 hover). "
                         "Lower = safer for bench testing without props.")
+    # tracking PID / tuning (all optional — defaults are for 5-inch drone)
+    p.add_argument("--pid-yaw", type=float, nargs=4, default=[2.0, 0.1, 0.5, 300],
+                   metavar=("KP", "KI", "KD", "LIMIT"),
+                   help="Yaw PID: kp ki kd limit (default: 2.0 0.1 0.5 300)")
+    p.add_argument("--pid-pitch", type=float, nargs=4, default=[2.5, 0.1, 0.5, 300],
+                   metavar=("KP", "KI", "KD", "LIMIT"),
+                   help="Pitch PID: kp ki kd limit (default: 2.5 0.1 0.5 300)")
+    p.add_argument("--pid-thr", type=float, nargs=4, default=[1.5, 0.05, 0.3, 200],
+                   metavar=("KP", "KI", "KD", "LIMIT"),
+                   help="Throttle PID: kp ki kd limit (default: 1.5 0.05 0.3 200)")
+    p.add_argument("--tracking-rate-limit", type=int, default=50,
+                   help="Max RC change per frame (anti-jerk, default: 50)")
+    p.add_argument("--tracking-target-area", type=float, default=0.05,
+                   help="Target box area ratio (default: 0.05 = 5%% of frame)")
+    p.add_argument("--tracking-lost-timeout", type=float, default=2.0,
+                   help="Seconds before entering search mode (default: 2.0)")
+    p.add_argument("--tracking-max-lost", type=float, default=5.0,
+                   help="Seconds in search before disengaging (default: 5.0)")
     opt = p.parse_args()
 
     # --track / --no-track
@@ -379,8 +397,16 @@ def main():
         msp = MSP()
         msp.stream_start()
         tc = TrackingController(msp, crsf_port=opt.crsf_port,
-                                base_throttle=opt.base_throttle)
+                                base_throttle=opt.base_throttle,
+                                pid_yaw=opt.pid_yaw,
+                                pid_pitch=opt.pid_pitch,
+                                pid_thr=opt.pid_thr,
+                                rate_limit=opt.tracking_rate_limit,
+                                target_area_ratio=opt.tracking_target_area,
+                                lost_timeout=opt.tracking_lost_timeout,
+                                max_lost_time=opt.tracking_max_lost)
         print(f"Auto-tracking: ENABLED (base_throttle={opt.base_throttle})")
+        print(f"  PID yaw={opt.pid_yaw}  pitch={opt.pid_pitch}  thr={opt.pid_thr}")
         if tracking_switch_chan is not None:
             print(f"  Radio switch: CRSF CH{tracking_switch_chan} (>1700=engage, <1300=disengage)")
         else:

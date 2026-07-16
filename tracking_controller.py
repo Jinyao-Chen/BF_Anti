@@ -212,12 +212,24 @@ class TrackingController:
     RATE_LIMIT = 50          # max RC change per frame (anti-jerk)
     TARGET_AREA_RATIO = 0.05  # target box should be ~5% of frame
 
-    def __init__(self, msp, crsf_port, base_throttle=1100):
+    def __init__(self, msp, crsf_port, base_throttle=1100,
+                 pid_yaw=(2.0, 0.1, 0.5, 300),
+                 pid_pitch=(2.5, 0.1, 0.5, 300),
+                 pid_thr=(1.5, 0.05, 0.3, 200),
+                 rate_limit=50, target_area_ratio=0.05,
+                 lost_timeout=2.0, max_lost_time=5.0):
         """
         Args:
             msp: MSP instance (already connected to FC)
             crsf_port: e.g. '/dev/ttyS3' for ELRS CRSF stream
             base_throttle: idle/hover throttle (1100=bench safe, 1550=flight hover)
+            pid_yaw: (kp, ki, kd, limit) for yaw PID
+            pid_pitch: (kp, ki, kd, limit) for pitch PID
+            pid_thr: (kp, ki, kd, limit) for throttle PID
+            rate_limit: max RC change per frame (anti-jerk)
+            target_area_ratio: target box should be ~5% of frame
+            lost_timeout: seconds before entering search mode
+            max_lost_time: seconds in search before giving up
         """
         self.msp = msp
         self.crsf = CRSFReader(crsf_port) if crsf_port else None
@@ -226,15 +238,22 @@ class TrackingController:
             min_track_age=self.MIN_TRACK_AGE,
         )
 
-        # PIDs
-        self.pid_yaw   = PID(kp=2.0, ki=0.1, kd=0.5, limit=300)
-        self.pid_pitch = PID(kp=2.5, ki=0.1, kd=0.5, limit=300)
-        self.pid_thr   = PID(kp=1.5, ki=0.05, kd=0.3, limit=200)
+        # PIDs — fully configurable
+        self.pid_yaw   = PID(kp=pid_yaw[0], ki=pid_yaw[1], kd=pid_yaw[2], limit=int(pid_yaw[3]))
+        self.pid_pitch = PID(kp=pid_pitch[0], ki=pid_pitch[1], kd=pid_pitch[2], limit=int(pid_pitch[3]))
+        self.pid_thr   = PID(kp=pid_thr[0], ki=pid_thr[1], kd=pid_thr[2], limit=int(pid_thr[3]))
+
+        # Tuning overrides
+        self.RATE_LIMIT = rate_limit
+        self.TARGET_AREA_RATIO = target_area_ratio
+        self.LOST_TIMEOUT = lost_timeout
+        self.MAX_LOST_TIME = max_lost_time
 
         # state
         self.state = "MANUAL"          # MANUAL | ARMED | TRACKING | LOST
         self._engage_time = 0.0
         self._lost_since = 0.0
+        self._last_step_time = 0.0     # for real dt computation
         self._search_dir = 1           # +1 = yaw right, -1 = yaw left
         self._prev_rc = {'roll': 1500, 'pitch': 1500, 'yaw': 1500, 'throttle': 1050, 'aux1': 2000}
         self._base_throttle = base_throttle
@@ -319,7 +338,12 @@ class TrackingController:
         ex_norm = ex / (fw / 2.0)   # [-1, 1]
         ey_norm = ey / (fh / 2.0)   # [-1, 1]
 
-        dt = 1.0 / 30.0  # assume ~30fps
+        # real frame interval (with fallback for first frame)
+        if self._last_step_time > 0:
+            dt = now - self._last_step_time
+        else:
+            dt = 1.0 / 30.0  # first frame: assume 30fps
+        self._last_step_time = now
 
         # PID outputs
         yaw_out   = self.pid_yaw.update(ex_norm * 500, dt)
@@ -374,6 +398,7 @@ class TrackingController:
             return False   # pilot is flying, won't engage
         self.state = "ARMED"
         self._engage_time = time.monotonic()
+        self._last_step_time = 0.0   # reset dt tracking
         self.pid_yaw.reset()
         self.pid_pitch.reset()
         self.pid_thr.reset()
