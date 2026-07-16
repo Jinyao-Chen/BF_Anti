@@ -1,0 +1,41 @@
+;
+; pal_video.pio — 1-bit PAL 像素输出
+;
+; Auto-pull 8 bits from TX FIFO, 1 bit/cycle serial output
+; DMA fills TX FIFO continuously
+;
+
+.program pal_video
+
+.wrap_target
+    out pins, 1   ; output LSB of OSR to pin, right-shift OSR
+                  ; OSR empty → auto-pull 8 bits from TX FIFO
+.wrap
+
+% c-sdk {
+
+#include "hardware/pio.h"
+
+static inline void pal_video_program_init(PIO pio, uint sm, uint offset,
+                                           uint pin, float clk_div)
+{
+    pio_sm_config c = pal_video_program_get_default_config(offset);
+
+    // PIO 接管 GPIO
+    pio_gpio_init(pio, pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+
+    // 输出 1 pin
+    sm_config_set_out_pins(&c, pin, 1);
+
+    // 右移输出: LSB 先出 (packbits('little') pixel[0] = bit 0)
+    // auto-pull 8 bits from TX FIFO when OSR empty
+    sm_config_set_out_shift(&c, true, true, 8);
+
+    // 时钟: sys_clk / clk_div
+    sm_config_set_clkdiv(&c, clk_div);
+
+    pio_sm_init(pio, sm, offset, &c);
+}
+
+%}
