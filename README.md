@@ -51,7 +51,9 @@ USB 相机 ──▶ RDK X5 ── BPU 推理 ── YOLO 检测框
 BF_Anti/
 ├── detect.py                 主程序: YOLO 检测 + 追踪 + MSP 控制
 ├── tracker.py                中心距离目标追踪 (EMA 平滑 + 轨迹)
-├── tracking_controller.py    PBVS 视觉伺服 + 状态机 + PID 控制
+├── tracking_controller.py    PBVS 视觉伺服 + 状态机 + PID 控制 (纯计算)
+├── rc_mux.py                 RC 融合层 (50Hz, 透传/替换/停发)
+├── crsf.py                   CRSF 协议解码 + CRC8 校验
 ├── msp.py                    Betaflight MSP 协议驱动 (USB VCP)
 ├── video.py                  PAL 视频帧编码 → SPI → Pico
 ├── motors.py                 安全电机测试 (油门 1050→1100)
@@ -60,11 +62,31 @@ BF_Anti/
 │   ├── main.c                SPI 从机 + SCLK 间隔同步 + DMA + 看门狗
 │   ├── pal_video.pio         PIO 状态机 (PAL 像素输出)
 │   └── CMakeLists.txt
+├── tests/                    单元测试
+│   ├── test_crsf.py
+│   ├── test_rc_mux.py
+│   ├── test_tracking_controller.py
+│   └── test_msp_flags.py
 └── scripts/
     ├── hw_test.py            SPI 硬件链路诊断
     ├── gpio_probe.py         GPIO 探测工具
     ├── usb_camera_probe.py   USB 摄像头能力探测
     └── usb_camera_test_gst.py GStreamer 摄像头测试
+```
+
+---
+
+## 安装依赖
+
+```bash
+# rdk_model_zoo (BPU 推理运行时, 符号链接或克隆到项目根目录)
+git clone https://github.com/D-Robotics/rdk_model_zoo.git ~/rdk_model_zoo
+ln -s ~/rdk_model_zoo ~/BF_Anti/rdk_model_zoo
+
+# Python 依赖
+pip3 install pyserial numpy opencv-python pytest
+
+# 模型文件放入 model/ (X5 .bin 格式, 不随仓库分发)
 ```
 
 ---
@@ -81,8 +103,9 @@ BF_Anti/
 - ESC Protocol → **DSHOT600**
 
 **Modes 标签页:**
-- ARM → AUX1, 范围 1900–2100
-- 其他模式全部删除
+- ARM → AUX1, 范围 1900–2100（飞手物理开关，软件永不控制）
+- **ANGLE → AUX2, 范围 900–2100（全量程常开，必须！）**
+  追踪控制器输出的是倾角语义杆量，ACRO 模式下会导致翻滚。
 
 **CLI:**
 ```
@@ -92,6 +115,12 @@ set vcd_video_system = PAL
 feature -MOTOR_STOP
 save
 ```
+
+### 1.5 ELRS 接收机
+
+- 接收机 **只接 RDK X5 UART**（如 /dev/ttyS3），不接飞控。
+- ELRS 接收机 failsafe 模式必须设为 **No Pulses**（断线时停发 CRSF，X5 据此停发 MSP → 飞控进入自身 failsafe）。
+- X5 融合逻辑：透传飞手杆量；追踪时仅替换 RPYT，AUX1-4（含 ARM）永远透传。
 
 ### 2. RDK X5
 
@@ -215,24 +244,28 @@ python3 ~/BF_Anti/motors.py
 ## 追踪状态机
 
 ```
-MANUAL ──(t 键 / 摇杆开关)──▶ ARMED ──(检测到目标)──▶ TRACKING
-                                                         │
-                                           ┌─ 目标丢失 >2s ─▶ LOST ──(>5s)──▶ MANUAL
-                                           │                    │
-                                           └─ 摇杆偏差 >30% ────┴──▶ MANUAL
-                                           └─ CRSF 断线 >1s ───────▶ MANUAL
+RCMux:  PASSTHROUGH ──(开关低→高 且 见过低位)──▶ 请求追踪
+        AUTO ◀──(TrackCmd 新鲜)──┘
+        AUTO ──(接管/开关低/指令过期)──▶ PASSTHROUGH
+        任意 ──(CRSF 断线>0.5s)──▶ SILENT (停发, BF failsafe)
+
+Controller: MANUAL ──engage──▶ ARMED ──目标出现──▶ TRACKING
+            TRACKING ──丢失>2s──▶ LOST ──重捕获──▶ TRACKING
+            LOST ──超5s──▶ MANUAL (停止输出, mux 自动回透传)
 ```
 
 ## 安全机制
 
 | 机制 | 行为 |
 |------|------|
-| 摇杆偏差 >30% | 立即退出追踪, DISARM + 油门归零 |
-| CRSF 断线 (>1s) | 强制退出追踪 |
-| 追踪油门限幅 | 1050–1600 RC 单位 |
-| MSP 保活重连 | 串口异常不退出, 自动重试 |
+| ARM 归属 | AUX1 永远透传飞手开关，软件无 DISARM 能力 |
+| 摇杆接管 (R/P/Y >30% 或油门偏移 >15%) | 立即切回透传，飞手继续飞行（不上锁） |
+| CRSF 断线 >0.5s | X5 停发 MSP → 飞控自身 failsafe |
+| 视觉环卡死/崩溃 (指令过期 >0.5s) | RCMux 自动切回透传 |
+| 追踪开关 | 须先见低位；接管后需拨低再拨高重新切入 |
+| CRSF CRC8 校验 | 坏帧丢弃，不会误触发切入/接管 |
+| 追踪指令限幅 | RPYT 逐通道 clamp + 每帧变化率限制 + 0.5s 切入斜坡 |
 | Pico 看门狗 | X5 停止发帧 >2s → Pico 自动复位 |
-| 异常退出 | `finally` 块先 DISARM 再关相机 |
 
 ---
 
@@ -253,7 +286,6 @@ MANUAL ──(t 键 / 摇杆开关)──▶ ARMED ──(检测到目标)──
 | 项目 | 说明 |
 |------|------|
 | 追踪 PID | 参数硬编码, 需按机型手动调整 |
-| dt 估算 | 固定 1/30, 帧率波动时 PID 行为漂移 |
 | MSP 线程 | `_rc_data` 无锁 (CPython GIL 下安全) |
 | SPI 图传 | 仅 1-bit 黑白 408×576 @ 25fps |
 | X5 SPI CS | 硬件 CS 不工作, Pico 用 SCLK 间隔同步 |
