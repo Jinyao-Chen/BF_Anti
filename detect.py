@@ -190,7 +190,7 @@ def draw_status_bar(img, capture_fps, infer_fps, display_fps,
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6 * fs, (200, 255, 200), lh, cv2.LINE_AA)
 
     # tracking state (on screen centre-top)
-    if tracking_state and tracking_state != "MANUAL":
+    if tracking_state and not tracking_state.endswith("MANUAL"):
         label = f"TRACK: {tracking_state}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.2 * fs, max(2, int(2 * fs)))
         cx = (img.shape[1] - tw) // 2
@@ -385,33 +385,43 @@ def main():
         print(f"Tracker: dist_thresh={opt.track_dist_thresh}  alpha={opt.track_alpha}  "
               f"max_lost={opt.track_max_lost}")
 
-    # ----- Auto-tracking controller ------------------------------------------ #
+    # ----- Auto-tracking: MSP + CRSF + RCMux + Controller --------------------- #
     tracking = opt.tracking
     tc = None
     msp = None
-    tracking_switch_chan = opt.tracking_switch
-    _tsw_prev = False  # switch previous state (for edge detection)
+    crsf = None
+    mux = None
     if tracking:
         from msp import MSP
+        from crsf import CRSFReader
+        from rc_mux import RCMux
         from tracking_controller import TrackingController
         msp = MSP()
-        msp.stream_start()
-        tc = TrackingController(msp, crsf_port=opt.crsf_port,
-                                base_throttle=opt.base_throttle,
-                                pid_yaw=opt.pid_yaw,
+        msp.telemetry_start()
+        if opt.crsf_port:
+            crsf = CRSFReader(opt.crsf_port, opt.crsf_baud)
+        tc = TrackingController(pid_yaw=opt.pid_yaw,
                                 pid_pitch=opt.pid_pitch,
                                 pid_thr=opt.pid_thr,
                                 rate_limit=opt.tracking_rate_limit,
                                 target_area_ratio=opt.tracking_target_area,
                                 lost_timeout=opt.tracking_lost_timeout,
-                                max_lost_time=opt.tracking_max_lost)
-        print(f"Auto-tracking: ENABLED (base_throttle={opt.base_throttle})")
+                                max_lost_time=opt.tracking_max_lost,
+                                attitude_fn=msp.attitude)
+        mux = RCMux(msp, crsf=crsf,
+                    switch_channel=opt.tracking_switch,
+                    base_throttle=opt.base_throttle)
+        mux.on_engage = tc.engage
+        mux.on_disengage = tc.disengage
+        mux.start()
+        print("Auto-tracking: ENABLED (full MSP RX fusion)")
         print(f"  PID yaw={opt.pid_yaw}  pitch={opt.pid_pitch}  thr={opt.pid_thr}")
-        if tracking_switch_chan is not None:
-            print(f"  Radio switch: CRSF CH{tracking_switch_chan} (>1700=engage, <1300=disengage)")
+        if crsf is not None:
+            print(f"  CRSF passthrough: {opt.crsf_port} — ARM 由飞手 AUX1 掌握")
+            if opt.tracking_switch is not None:
+                print(f"  切入开关: CRSF CH{opt.tracking_switch} (须先见低位)")
         else:
-            print(f"  Keyboard: press 't' to engage/disengage (bench test only)")
-        print(f"  Stick deviation >30% → auto-disengage")
+            print(f"  BENCH mode (无 CRSF): 键盘 't' 切换, base_throttle={opt.base_throttle}")
 
     # ----- SPI PAL video output ---------------------------------------------- #
     spi_video = opt.spi_video
@@ -490,27 +500,11 @@ def main():
                 t_cls_ids = raw_cls_ids
                 t_ids     = None
 
-            # ---- auto-tracking (PBVS + MSP Override) ---- #
+            # ---- auto-tracking: 每帧计算并发布指令 (mux 决定是否使用) ---- #
             if tracking and tc is not None:
-                # CRSF switch engagement
-                if tracking_switch_chan is not None and tc.crsf is not None:
-                    ch = tc.crsf.channels()
-                    if len(ch) > tracking_switch_chan:
-                        tsw = ch[tracking_switch_chan] > 1700
-                        if tsw and not _tsw_prev:
-                            if tc.state == "MANUAL":
-                                if tc.engage():
-                                    print("[TRACK] Switch ENGAGED")
-                        elif not tsw and _tsw_prev:
-                            if tc.state != "MANUAL":
-                                tc._disengage()
-                                print("[TRACK] Switch DISENGAGED")
-                        _tsw_prev = tsw
-
-                if tc.state != "MANUAL":
-                    rc = tc.step(frame, raw_boxes, raw_scores, raw_cls_ids, tracker)
-                    if rc:
-                        msp.set_rc_dict(rc)
+                cmd = tc.step(frame, raw_boxes, raw_scores, raw_cls_ids, tracker)
+                if cmd is not None:
+                    mux.publish_cmd(cmd)
 
             # ---- FPS counters ---- #
             if t_loop_start is None:
@@ -542,7 +536,8 @@ def main():
                 draw_status_bar(vis, capture_fps, infer_fps, display_fps,
                                 n_tracks=len(t_boxes), n_raw_dets=len(raw_boxes),
                                 ui_scale=ui_scale,
-                                tracking_state=tc.state if tc is not None else None)
+                                tracking_state=(f"{mux.mode}:{tc.state}"
+                                                if tc is not None else None))
 
                 if spi_video and pal is not None:
                     pal.update_frame_bgr(vis)
@@ -557,16 +552,12 @@ def main():
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord('q'):
                         break
-                    elif key == ord('t') and tracking and tc is not None:
-                        # Keyboard toggle (bench test, or override radio switch)
-                        if tc.state == "MANUAL":
-                            if tc.engage():
-                                print("[TRACK] ENGAGED — tracking active")
-                            else:
-                                print("[TRACK] engage failed (stick not centered)")
+                    elif key == ord('t') and tracking and mux is not None:
+                        if crsf is not None:
+                            print("[TRACK] 有 CRSF 时由摇杆开关控制, 键盘切换已禁用")
                         else:
-                            tc._disengage()
-                            print("[TRACK] DISENGAGED")
+                            engaged = mux.bench_toggle()
+                            print(f"[TRACK] bench {'ENGAGED' if engaged else 'DISENGAGED'}")
 
             # ---- logging ---- #
             now = time.perf_counter()
@@ -588,10 +579,11 @@ def main():
         print("\nInterrupted.")
     finally:
         # 先关追踪 (发送 DISARM + throttle=1000), 再关相机 (可能阻塞 2s)
-        if tc is not None:
-            tc._disengage()
-            tc.close()
-            print("[TRACK] disengaged")
+        if mux is not None:
+            mux.stop(park=(crsf is None))
+            print(f"[TRACK] mux stopped (mode={mux.mode})")
+        if crsf is not None:
+            crsf.close()
         if msp is not None:
             msp.close()
         cap.stop()
