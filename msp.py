@@ -107,6 +107,9 @@ class MSP:
         self._stream_alive = False
         self._stream_thread = None
         self._serial_lock = threading.Lock()
+        self._attitude = None          # (roll, pitch, yaw, t_monotonic)
+        self._telem_alive = False
+        self._telem_thread = None
 
     # -- MSP 协议 ---------------------------------------------------------------
 
@@ -185,6 +188,34 @@ class MSP:
         self._stream_alive = False
         if self._stream_thread:
             self._stream_thread.join(timeout=0.5)
+
+    # -- 姿态缓存线程 (M1: 控制环不再阻塞读串口) --------------------------------
+
+    def telemetry_start(self, rate_hz=20):
+        """后台定频读姿态存缓存. 启动后其他线程不得再调用会读回复的方法
+        (att/rc_channels/arming_flags/version), 以保证 self.buf 单读者."""
+        if self._telem_alive:
+            return
+        self._telem_alive = True
+        self._telem_thread = threading.Thread(
+            target=self._telem_task, args=(rate_hz,), daemon=True)
+        self._telem_thread.start()
+
+    def _telem_task(self, rate_hz):
+        period = 1.0 / rate_hz
+        while self._telem_alive:
+            t0 = time.monotonic()
+            try:
+                a = self.att()
+                if a:
+                    self._attitude = (a[0], a[1], a[2], time.monotonic())
+            except Exception:
+                pass
+            time.sleep(max(0.01, period - (time.monotonic() - t0)))
+
+    def attitude(self):
+        """最近缓存的 (roll, pitch, yaw, t) 或 None. 调用方自行检查 t 新鲜度."""
+        return self._attitude
 
     # -- RC 通道 ----------------------------------------------------------------
 
@@ -267,6 +298,9 @@ class MSP:
         return (var, pv[0], pv[1], pv[2]) if pv and len(pv) >= 3 else None
 
     def close(self):
+        self._telem_alive = False
+        if self._telem_thread:
+            self._telem_thread.join(timeout=0.5)
         self.stream_stop()
         self.ser.close()
 
