@@ -71,3 +71,50 @@ class CRSFParser:
                 self.frames_bad += 1
                 del self._buf[:1]
         return got
+
+
+class CRSFReader:
+    """串口读线程. channels() 返回最新 16 通道或 None; age() 返回最后有效帧距今秒数."""
+
+    def __init__(self, port, baud=420000):
+        self._ser = serial.Serial(port, baud, timeout=0.02)
+        self._parser = CRSFParser()
+        self._lock = threading.Lock()
+        self._channels = None
+        self._last_valid = None
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def channels(self):
+        with self._lock:
+            return list(self._channels) if self._channels else None
+
+    def age(self, now=None):
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            if self._last_valid is None:
+                return float('inf')
+            return now - self._last_valid
+
+    def close(self):
+        self._running = False
+        self._thread.join(timeout=0.5)
+        try:
+            self._ser.close()
+        except Exception:
+            pass
+
+    def _run(self):
+        while self._running:
+            try:
+                data = self._ser.read(64)
+            except Exception:
+                if not self._running:
+                    break
+                time.sleep(0.05)
+                continue
+            if data and self._parser.feed(data):
+                with self._lock:
+                    self._channels = self._parser.channels
+                    self._last_valid = time.monotonic()
