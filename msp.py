@@ -42,11 +42,11 @@ class MSP_CMD:
     SET_RAW_RC        = 200
 
 
-# Arming disable flags (fc/runtime_config.h)
+# Arming disable flags — Betaflight 4.5-maintenance fc/runtime_config.h
 ARMING_FLAG_NAMES = {
     0:  "NO_GYRO",
-    1:  "FAILSAFE",           # 飞控处于 FAILSAFE 状态
-    2:  "RX_FAILSAFE",        # 无有效接收机信号 ← 我们遇到的标志
+    1:  "FAILSAFE",
+    2:  "RX_FAILSAFE",
     3:  "NOT_DISARMED",
     4:  "BOXFAILSAFE",
     5:  "RUNAWAY_TAKEOFF",
@@ -69,11 +69,9 @@ ARMING_FLAG_NAMES = {
     22: "DSHOT_BITBANG",
     23: "ACC_CALIBRATION",
     24: "MOTOR_PROTOCOL",
-    25: "CRASHFLIP",
-    26: "ALTHOLD",
-    27: "POSHOLD",
-    28: "ARM_SWITCH",         # 没配 ARM 开关
+    25: "ARM_SWITCH",
 }
+ARM_SWITCH_BIT = 25
 
 
 # ---- 串口通信层 --------------------------------------------------------------
@@ -126,7 +124,7 @@ class MSP:
             return None
         return self._read_reply(cmd)
 
-    def _read_reply(self, expected_cmd, timeout=0.5):
+    def _read_reply(self, expected_cmd, timeout=0.15):
         """等待指定命令的响应"""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -365,7 +363,7 @@ def cmd_arm():
     for i in range(30):
         flags = m.arming_flags()
         if flags is not None:
-            arm_switch = bool(flags & (1 << 23))
+            arm_switch = bool(flags & (1 << ARM_SWITCH_BIT))
             if not arm_switch:
                 print(f"  ✅ ARM_SWITCH 消除 (flags=0x{flags:08X})")
                 break
