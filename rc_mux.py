@@ -134,7 +134,8 @@ class RCMux:
         if self._auto:
             rpyt = self._select_rpyt(now, ch)
         else:
-            rpyt = (1500, 1500, 1000, 1500)  # 中立值, FC 用 CRSF 原生
+            # 透传飞手 RPYT — AUX3 切高位时 FC 立刻用 MSP 值, 必须无缝衔接
+            rpyt = (ch[0], ch[1], ch[2], ch[3])
 
         aux = ch[4:8]
         self.msp.set_rc(rpyt[0], rpyt[1], rpyt[2], rpyt[3],

@@ -91,14 +91,24 @@ class MSP:
     MSP_HEADER_V1 = b"$M<"
     MSP_HEADER_V1_R = b"$M>"
 
-    def __init__(self, port="/dev/ttyACM0", baud=115200):
+    def __init__(self, port="/dev/ttyACM0", baud=115200, retry_timeout=30):
         self.port = port
-        self.ser = serial.Serial(
-            port=port, baudrate=baud,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=0.05)
+        self.ser = None
+        deadline = time.monotonic() + retry_timeout
+        while True:
+            try:
+                self.ser = serial.Serial(
+                    port=port, baudrate=baud,
+                    bytesize=serial.EIGHTBITS,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=0.05)
+                break
+            except (serial.SerialException, FileNotFoundError):
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f"MSP: {port} 未就绪, {retry_timeout}s 超时")
+                print(f"[MSP] 等待 {port}...")
+                time.sleep(2)
         self.buf = bytearray()
         time.sleep(1.5)  # FC 启动时间
 
@@ -265,10 +275,15 @@ class MSP:
         return None
 
     def rc_channels(self):
-        """读飞控端 rcData 值 (8 通道)"""
+        """读飞控端 rcData 值 (8 通道), 返回 [Roll, Pitch, Thr, Yaw, AUX1..4].
+
+        BF 内部顺序是 [Roll, Pitch, Yaw, Thr], 这里统一转为 AETR 约定."""
         p = self._send_cmd(MSP_CMD.GET_RC)
         if p and len(p) >= 16:
-            return list(struct.unpack_from('<' + 'H' * min(len(p)//2, 8), p, 0))
+            ch = list(struct.unpack_from('<' + 'H' * min(len(p)//2, 8), p, 0))
+            if len(ch) >= 4:
+                ch[2], ch[3] = ch[3], ch[2]  # Yaw<->Thr → AETR
+            return ch
         return None
 
     def arming_flags(self):

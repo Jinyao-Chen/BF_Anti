@@ -15,7 +15,6 @@ import sys, os, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from msp import MSP
 
-THR_STEPS = list(range(1050, 1151, 5))  # 1050→1150, 慢爬
 CH_NAMES = ["Roll", "Pitch", "Thr", "Yaw", "AUX1", "AUX2", "AUX3", "AUX4"]
 
 
@@ -53,27 +52,30 @@ def main():
                 print(f"\rAUX1={ch[4]} (需要 >1700 解锁)", end="")
             time.sleep(0.15)
 
-    # 发中立值, AUX 全透传
+    # 发透传值 (RPYT 跟飞手摇杆, AUX 全透传) — 切 AUX3 时无缝衔接
     for _ in range(10):
         ch, _ = m.rc_cached()
         if ch:
-            m.set_rc(1500, 1500, 1000, 1500, ch[4], ch[5], ch[6], ch[7])
+            m.set_rc(ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7])
         time.sleep(0.02)
 
     print("\n等待 OVERRIDE (AUX3 推高位)...")
     override = False
+    captured_thr = 1100
     while not override:
         ch, _ = m.rc_cached()
         if ch and ch[6] > 1700:
             override = True
-            print(f"\n✅ OVERRIDE 激活! AUX3={ch[6]}")
+            captured_thr = ch[2]  # 记录飞手当前油门, 从这里接管
+            print(f"\n✅ OVERRIDE 激活! AUX3={ch[6]}  接管油门={captured_thr}")
         else:
             if ch:
-                show(ch, "等待 AUX3↑")
+                # AUX3 低位时透传飞手全部通道 (FC 无视, 走 CRSF 原生)
+                m.set_rc(ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7])
             time.sleep(0.1)
 
     # ── 接管开始 ────────────────────────────────────
-    print("\nX5 接管 RPYT — 油门慢爬...")
+    print(f"\nX5 接管 RPYT — 油门从 {captured_thr} 慢爬...")
     print("随时拨 AUX3 回低位即可收回控制权!")
     print()
 
@@ -81,6 +83,8 @@ def main():
     thr_idx = 0
     last_show = 0
     t0 = time.monotonic()
+    # 从飞手油门开始, 逐步加 50
+    thr_seq = list(range(max(1050, captured_thr), captured_thr + 101, 5))
 
     while takeover:
         now = time.monotonic()
@@ -102,7 +106,7 @@ def main():
             break
 
         # 油门爬升
-        thr = THR_STEPS[min(thr_idx, len(THR_STEPS) - 1)]
+        thr = thr_seq[min(thr_idx, len(thr_seq) - 1)]
         if now - t0 > (thr_idx + 1) * 0.5:  # 每 0.5s 升一档
             thr_idx += 1
 

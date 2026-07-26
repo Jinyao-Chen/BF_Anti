@@ -1,0 +1,26 @@
+[Unit]
+Description=BF_Anti Detect + Tracking Pipeline
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+User=BOARD_USER
+WorkingDirectory=BOARD_HOME/BF_Anti
+Environment="DISPLAY=:0"
+Environment="BF_MODEL=BOARD_HOME/BF_Anti/model/v1_yolov8_mAP50_0.879_bayese_640x640_nv12.bin"
+
+# 飞行追踪 (需要飞控已连接, 接收机已对频)
+ExecStartPre=/bin/sleep 5
+ExecStart=__BASE_DIR__/run_detect.sh fly
+
+# 异常退出自动重启
+Restart=on-failure
+RestartSec=3
+
+# 优雅停止: SIGINT → detect.py 的 finally 块会 DISARM
+KillSignal=SIGINT
+TimeoutStopSec=5
+
+[Install]
+WantedBy=default.target
