@@ -34,7 +34,7 @@ class RCMux:
 
     def __init__(self, msp, crsf=None, switch_channel=None,
                  base_throttle=1100, crsf_timeout=0.5, cmd_timeout=0.5,
-                 rate_hz=50):
+                 rate_hz=50, channel_source=None):
         self.msp = msp
         self.crsf = crsf
         self.switch_channel = switch_channel
@@ -42,6 +42,7 @@ class RCMux:
         self.crsf_timeout = crsf_timeout
         self.cmd_timeout = cmd_timeout
         self.rate_hz = rate_hz
+        self._channel_source = channel_source  # ()->(channels, age) for FC mode
         self.on_engage = None
         self.on_disengage = None
 
@@ -78,9 +79,17 @@ class RCMux:
                 pass
 
     def _tick(self, now):
-        if self.crsf is None:
-            self._tick_bench(now)
+        if self.crsf is not None:
+            self._tick_crsf(now)
             return
+        if self._channel_source is not None:
+            self._tick_fc_mode(now)
+            return
+        self._tick_bench(now)
+
+    # ── CRSF 本地直连模式 ──────────────────────────────────────────────
+
+    def _tick_crsf(self, now):
         ch = self.crsf.channels()
         if ch is None or self.crsf.age(now) > self.crsf_timeout:
             if self.mode != "SILENT":
@@ -101,6 +110,47 @@ class RCMux:
         aux = ch[4:8]
         self.msp.set_rc(rpyt[0], rpyt[1], rpyt[2], rpyt[3],
                         aux[0], aux[1], aux[2], aux[3])
+
+    # ── FC 模式: 接收机在飞控上, X5 通过 MSP_GET_RC 读通道 ─────────────
+
+    def _tick_fc_mode(self, now):
+        """FC 架构: 开关/接管检测走 MSP RC 缓存, AUX 透传飞手.
+        RPYT 在 AUTO 时用追踪值, 否则发中立值 (FC 靠 BOXMSPOVERRIDE 切换).
+        """
+        rc_data, rc_age = self._channel_source()
+        if rc_data is None or rc_age > 2.0:
+            # RC 缓存过期 (>2s) → 不更新 AUX, 仅维持 RPYT
+            self._send_fc_rpyt(now)
+            return
+
+        ch = rc_data[:16] if len(rc_data) >= 8 else (rc_data + [1500] * (16 - len(rc_data)))
+        self.mode = "PASSTHROUGH"  # FC 架构无 SILENT, failsafe 由飞控原生 CRSF 保证
+
+        self._update_switch(ch)
+        if self._auto and self._takeover(ch):
+            self._exit_auto()
+            self._inhibit = True
+
+        if self._auto:
+            rpyt = self._select_rpyt(now, ch)
+        else:
+            rpyt = (1500, 1500, 1000, 1500)  # 中立值, FC 用 CRSF 原生
+
+        aux = ch[4:8]
+        self.msp.set_rc(rpyt[0], rpyt[1], rpyt[2], rpyt[3],
+                        aux[0], aux[1], aux[2], aux[3])
+
+    def _send_fc_rpyt(self, now):
+        """RC 缓存过期时仅发送 RPYT (不发 AUX, 避免误触 ARM)."""
+        if self._auto:
+            cmd = self._cmd
+            if cmd is not None and (now - cmd.t) <= self.cmd_timeout:
+                self.msp.set_rc(cmd.roll, cmd.pitch, cmd.throttle, cmd.yaw,
+                                1500, 1500, 2000, 1500)
+            else:
+                self.msp.set_rc(1500, 1500, 1000, 1500, 1500, 1500, 1500, 1500)
+        else:
+            self.msp.set_rc(1500, 1500, 1000, 1500, 1500, 1500, 1500, 1500)
 
     def _update_switch(self, ch):
         if self.switch_channel is None or len(ch) <= self.switch_channel:

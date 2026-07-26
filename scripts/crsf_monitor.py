@@ -11,7 +11,7 @@ import time
 import argparse
 import threading
 
-sys.path.insert(0, "~/BF_Anti")
+sys.path.insert(0, "BOARD_HOME/BF_Anti")
 from crsf import CRSFParser
 import serial
 

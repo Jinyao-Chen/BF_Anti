@@ -108,6 +108,8 @@ class MSP:
         self._stream_thread = None
         self._serial_lock = threading.Lock()
         self._attitude = None          # (roll, pitch, yaw, t_monotonic)
+        self._rc_cache = None          # [8 channels], None if never received
+        self._rc_cache_t = 0.0
         self._telem_alive = False
         self._telem_thread = None
 
@@ -192,7 +194,7 @@ class MSP:
     # -- 姿态缓存线程 (M1: 控制环不再阻塞读串口) --------------------------------
 
     def telemetry_start(self, rate_hz=20):
-        """后台定频读姿态存缓存. 启动后其他线程不得再调用会读回复的方法
+        """后台定频读姿态 + RC 通道存缓存. 启动后其他线程不得再调用会读回复的方法
         (att/rc_channels/arming_flags/version), 以保证 self.buf 单读者."""
         if self._telem_alive:
             return
@@ -211,11 +213,22 @@ class MSP:
                     self._attitude = (a[0], a[1], a[2], time.monotonic())
             except Exception:
                 pass
+            try:
+                rc = self.rc_channels()
+                if rc:
+                    self._rc_cache = rc
+                    self._rc_cache_t = time.monotonic()
+            except Exception:
+                pass
             time.sleep(max(0.01, period - (time.monotonic() - t0)))
 
     def attitude(self):
         """最近缓存的 (roll, pitch, yaw, t) 或 None. 调用方自行检查 t 新鲜度."""
         return self._attitude
+
+    def rc_cached(self):
+        """最近缓存的 ([8 channels], t_monotonic) 或 (None, 0). 无锁, 单写者安全."""
+        return self._rc_cache, self._rc_cache_t
 
     # -- RC 通道 ----------------------------------------------------------------
 

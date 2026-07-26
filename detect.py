@@ -391,6 +391,7 @@ def main():
     msp = None
     crsf = None
     mux = None
+    channel_source = None
     if tracking:
         from msp import MSP
         from crsf import CRSFReader
@@ -408,9 +409,22 @@ def main():
                                 lost_timeout=opt.tracking_lost_timeout,
                                 max_lost_time=opt.tracking_max_lost,
                                 attitude_fn=msp.attitude)
+
+        # 通道源: CRSF 直连 > MSP RC 缓存 (FC 架构)
+        if crsf is not None:
+            channel_source = None  # RCMux 内部用 crsf.channels()
+        else:
+            def _msp_channel_source():
+                ch, t = msp.rc_cached()
+                if ch is None:
+                    return None, float('inf')
+                return ch, time.monotonic() - t
+            channel_source = _msp_channel_source
+
         mux = RCMux(msp, crsf=crsf,
                     switch_channel=opt.tracking_switch,
-                    base_throttle=opt.base_throttle)
+                    base_throttle=opt.base_throttle,
+                    channel_source=channel_source)
         mux.on_engage = tc.engage
         mux.on_disengage = tc.disengage
         mux.start()
@@ -420,8 +434,13 @@ def main():
             print(f"  CRSF passthrough: {opt.crsf_port} — ARM 由飞手 AUX1 掌握")
             if opt.tracking_switch is not None:
                 print(f"  切入开关: CRSF CH{opt.tracking_switch} (须先见低位)")
+        elif channel_source is not None:
+            print(f"  FC 架构: 接收机在飞控 (CRSF Serial RX), 通道读 MSP_GET_RC")
+            print(f"  BOXMSPOVERRIDE 由飞手 AUX3 物理开关控制")
+            if opt.tracking_switch is not None:
+                print(f"  切入开关: CH{opt.tracking_switch} (MSP RC 缓存)")
         else:
-            print(f"  BENCH mode (无 CRSF): 键盘 't' 切换, base_throttle={opt.base_throttle}")
+            print(f"  BENCH mode (无 CRSF / 无 FC): 键盘 't' 切换, base_throttle={opt.base_throttle}")
 
     # ----- SPI PAL video output ---------------------------------------------- #
     spi_video = opt.spi_video
@@ -553,8 +572,8 @@ def main():
                     if key == ord('q'):
                         break
                     elif key == ord('t') and tracking and mux is not None:
-                        if crsf is not None:
-                            print("[TRACK] 有 CRSF 时由摇杆开关控制, 键盘切换已禁用")
+                        if crsf is not None or channel_source is not None:
+                            print("[TRACK] 摇杆/物理开关控制中, 键盘切换已禁用")
                         else:
                             engaged = mux.bench_toggle()
                             print(f"[TRACK] bench {'ENGAGED' if engaged else 'DISENGAGED'}")

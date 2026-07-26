@@ -7,7 +7,6 @@ pico_fw/build/
 
 # Large files
 *.mp4
-*.bin
 
 # Symlinks
 betaflight
