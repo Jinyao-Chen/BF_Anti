@@ -11,6 +11,16 @@ pico_fw/build/
 # Symlinks
 betaflight
 rdk_model_zoo
+Anti-UAV/
+
+# Presentation / proposal / experiment materials
+# (canonical copy lives outside this repo: ../BF_Anti_materials)
+*.pptx
+*.docx
+make_ppt*.js
+gen_application.py
+experiment/
+extracted_images/
 
 # IDE
 .vscode/
