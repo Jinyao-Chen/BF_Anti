@@ -323,7 +323,10 @@ def test_pn_term_disabled_by_default():
 
 
 def test_pn_term_sign_and_magnitude():
-    """pn_gain=N：滚转增量 = atan(N*Vc*lambda_dot/g)，lambda_dot = u_dot/fx。"""
+    """pn_gain=N：滚转增量 = cap*tanh(raw/cap)，raw = atan(N*Vc*lambda_dot/g)。
+
+    lambda_dot = u_dot/fx；第一帧低通状态为空，直接取原始值，便于手算验算。
+    """
     bb = bbox_around(320.0, 300.0, 40.0)          # u 恰在 cx -> e_u = 0，基线干净
     own_rpy = (0.0, -30.0, 0.0)
 
@@ -334,10 +337,37 @@ def test_pn_term_sign_and_magnitude():
 
     fx = make_guidance().intrinsics.fx
     cmd0, cmd1, cmd2 = run(0.0), run(46.78), run(-46.78)
-    expect = math.degrees(math.atan(4.0 * 10.0 * (46.78 / fx) / 9.80665))
+    raw = math.degrees(math.atan(
+        4.0 * 10.0 * math.radians(math.degrees(46.78 / fx)) / 9.80665))
+    cap = 8.0
+    expect = cap * math.tanh(raw / cap)
     assert cmd1.roll_cmd_deg - cmd0.roll_cmd_deg == pytest.approx(expect, abs=1e-9)
     assert cmd2.roll_cmd_deg - cmd0.roll_cmd_deg == pytest.approx(-expect, abs=1e-9)
     assert cmd0.roll_cmd_deg == pytest.approx(0.0, abs=1e-9)
+    assert abs(cmd1.roll_cmd_deg) <= cap + 1e-9
+
+
+def test_pn_term_is_soft_capped():
+    """像素速率再大，比例导引项也不能超过 pn_roll_cap_deg（防滚转饱和 -> 绕飞）。"""
+    bb = bbox_around(320.0, 300.0, 40.0)
+    own_rpy = (0.0, -30.0, 0.0)
+    cap = 8.0
+    g = make_guidance(pn_gain=4.0, pn_roll_cap_deg=cap)
+    g._closing_mps = 10.0
+    cmd = g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 5000.0)
+    assert abs(cmd.roll_cmd_deg) <= cap + 1e-9
+    assert abs(cmd.roll_cmd_deg) > cap * 0.9          # 确实饱和到接近 cap
+
+
+def test_pn_term_gated_inside_terminal_range():
+    """终端段（bbox 撑满 -> range_est <= terminal_range）不用比例导引项。"""
+    own_rpy = (0.0, -30.0, 0.0)
+    bb = bbox_around(320.0, 300.0, 200.0)             # 框很大 -> 距离近
+    g = make_guidance(pn_gain=4.0)
+    g._closing_mps = 10.0
+    cmd = g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 300.0)
+    assert cmd.range_est_m <= g.terminal_range_m
+    assert cmd.pn_roll_deg == pytest.approx(0.0, abs=1e-12)
 
 
 def test_speed_source_closing_replaces_fc_velocity():

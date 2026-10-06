@@ -85,6 +85,10 @@ class PStrikeCommand:
     range_est_m: float = float("inf")
     z_target_est_m: float = float("nan")
     closing_ratio: float = 0.0   # s_dot / s，>0 表示接近
+    # 诊断用（不参与控制）：比例导引项用到的量，便于逐帧核对
+    vc_mps: float = 0.0          # 该帧实际使用的接近速度 Vc
+    u_rate_px_s: float = 0.0     # 该帧实际喂入的框中心水平像素速率
+    pn_roll_deg: float = 0.0     # 该帧比例导引项贡献的滚转（度）
 
     # 控制量
     roll_cmd_deg: float = 0.0
@@ -146,6 +150,10 @@ class PVisualGuidance:
         velalign_full_speed: float = 4.5,
         velalign_soft_deg: float = 10.0,
         pn_gain: float = 0.0,
+        pn_rate_lpf_s: float = 0.35,
+        pn_roll_cap_deg: float = 8.0,
+        pn_vc_min_mps: float = 2.0,
+        pn_vc_max_mps: float = 12.0,
         speed_source: str = "fc",
         align_gate: float = 0.15,
         align_pitch_limit_deg: float = 8.0,
@@ -220,6 +228,13 @@ class PVisualGuidance:
         #   a_pn = N * Vc * lambda_dot  ->  折算成滚转指令。需要外部喂入像素速率，
         #   本身不含时间状态；但它的物理含义是视线角速率，启用即**超出纯 P 契约**。
         self.pn_gain = float(pn_gain)
+        # λ̇ 的量测调理与限幅（实测 |u̇| 中位 80、峰 766 px/s，逐帧抖动极大；
+        # 不调理直接乘 N·Vc 会算出 50~78 度的滚转指令 -> 滚转持续饱和 -> 绕飞）。
+        self.pn_rate_lpf_s = float(pn_rate_lpf_s)
+        self.pn_roll_cap_deg = float(pn_roll_cap_deg)   # 软饱和上限：pn 项永不主导
+        self.pn_vc_min_mps = float(pn_vc_min_mps)       # Vc 钳位：避免增益被噪声调 15 倍
+        self.pn_vc_max_mps = float(pn_vc_max_mps)
+        self._lam_dps: Optional[float] = None           # λ̇ 低通状态（量测调理）
         # 超速治理/爬升限幅用哪个量当"速度"：fc=飞控速度（默认）；closing=视觉接近率
         # （无 GPS/光流真机的替代方案，纯视觉）。
         self.speed_source = str(speed_source)
@@ -426,6 +441,22 @@ class PVisualGuidance:
                                self.tau_min_s, self.tau_max_s))
         vz_ref_mps = (z_target_est - z_own) / tau_s if self.vz_time_to_go else None
 
+        # ---- 视线角速率 λ̇（量测调理，供比例导引项与视觉速度代理用）----
+        # λ̇ ≈ u_dot / fx；u_dot 取自跟踪器的框中心像素速率。它逐帧抖动极大
+        # （实测 |u_dot| 中位 80、p90 274、峰 766 px/s），必须先低通再进任何控制量。
+        lam_raw_dps = 0.0
+        if u_rate_px_s is not None:
+            lam_raw_dps = float(np.rad2deg(float(u_rate_px_s) /
+                                           max(1e-6, float(self.intrinsics.fx))))
+        if self.pn_rate_lpf_s > 0.0:
+            a_rate = float(dt) / (self.pn_rate_lpf_s + float(dt))
+            self._lam_dps = (lam_raw_dps if self._lam_dps is None
+                             else self._lam_dps + a_rate * (lam_raw_dps - self._lam_dps))
+            lam_dps = float(self._lam_dps)
+        else:
+            lam_dps = lam_raw_dps
+        u_rate_px_s_raw = float(u_rate_px_s) if u_rate_px_s is not None else 0.0
+
         # -------------------------------------------------------------- #
         # P 律
         # -------------------------------------------------------------- #
@@ -465,10 +496,17 @@ class PVisualGuidance:
         # 所以无 GPS/无光流的真机也能算。速率由感知层喂入（跟踪器的框中心速度），
         # 制导律自身不新增任何时间状态（契约测试据此仍然通过）。
         # 注意：u_dot 是**机体系**像素速率，与惯性系视线角速率差一个机体系转动项（低偏航速率下可忽略）。
-        if self.pn_gain > 0.0 and u_rate_px_s is not None:
-            lam_dot_rad_s = float(u_rate_px_s) / max(1e-6, float(self.intrinsics.fx))
-            a_pn_mps2 = self.pn_gain * float(self._closing_mps) * lam_dot_rad_s
-            roll_cmd += float(np.rad2deg(np.arctan(a_pn_mps2 / 9.80665)))
+        pn_roll_deg = 0.0
+        vc_pn = float(np.clip(self._closing_mps, self.pn_vc_min_mps, self.pn_vc_max_mps))
+        if (self.pn_gain > 0.0 and u_rate_px_s is not None
+                and range_est > self.terminal_range_m):
+            # 终端段（bbox 撑满）不用它：那时像素速率爆掉、几何由追踪项主导。
+            a_pn_mps2 = self.pn_gain * vc_pn * float(np.deg2rad(lam_dps))
+            raw_deg = float(np.rad2deg(np.arctan(a_pn_mps2 / 9.80665)))
+            pn_roll_deg = self.pn_roll_cap_deg * float(np.tanh(raw_deg / self.pn_roll_cap_deg))
+            roll_cmd += pn_roll_deg
+        vc_used_mps = float(self._closing_mps)
+        u_rate_used = u_rate_px_s_raw
 
         pitch_bias = el_los - self.camera_tilt_deg
         pitch_cmd = pitch_bias - self.kp_pitch * e_v_cmd
@@ -488,7 +526,12 @@ class PVisualGuidance:
         # 速度代理由 speed_source 决定：fc=飞控速度；closing=视觉接近率。
         # 迎头段测距变化率 ≈ 速度大小，因此无 GPS/光流时它是可用的替身。
         if self.speed_source == "closing":
-            v_horiz = abs(float(self._closing_mps))
+            # 纯视觉速度大小代理：sqrt(接近率² + (r·λ̇)²)。
+            # 只用接近率是不够的：绕飞时径向接近率≈0 而真实速度 6-7 m/s，
+            # 治理会以为没超速 -> 终端不减速 -> 最小转弯半径 8 m > 命中半径 -> 绕圈。
+            v_trans = (abs(float(range_est) * float(np.deg2rad(lam_dps)))
+                       if np.isfinite(range_est) else 0.0)
+            v_horiz = float(np.hypot(abs(float(self._closing_mps)), v_trans))
         else:
             v_horiz = float(np.hypot(own_vel[0], own_vel[1]))
         speed_floor = -self.max_pitch_down_deg
@@ -526,8 +569,12 @@ class PVisualGuidance:
         # 沿视线爬升的几何上限（只限制"上升"，下降不限制）
         vz_limit = None
         if self.climb_along_los and np.isfinite(el_los):
-            v_h = (abs(float(self._closing_mps)) if self.speed_source == "closing"
-                   else float(np.hypot(own_vel[0], own_vel[1])))
+            if self.speed_source == "closing":
+                v_trans = (abs(float(range_est) * float(np.deg2rad(lam_dps)))
+                           if np.isfinite(range_est) else 0.0)
+                v_h = float(np.hypot(abs(float(self._closing_mps)), v_trans))
+            else:
+                v_h = float(np.hypot(own_vel[0], own_vel[1]))
             # 地板 3 m/s：起步阶段水平速度≈0，纯几何值会把爬升掐死（起飞都困难）
             vz_limit = max(abs(v_h * np.tan(np.deg2rad(el_los))), 3.0) + self.climb_margin_mps
         throttle = self._altitude_pwm_raw(z_own, float(own_vel[2]), z_target_est,
@@ -598,6 +645,9 @@ class PVisualGuidance:
             yaw_rate_dps=float(yaw_rate),
             throttle_pwm=float(throttle),
             saturated=saturated,
+            vc_mps=vc_used_mps,
+            u_rate_px_s=u_rate_used,
+            pn_roll_deg=pn_roll_deg,
         )
         self._last_cmd = cmd          # COAST 保持用（不是控制动态）
         return cmd
