@@ -77,7 +77,7 @@ CSV_HEADER = [
     "own_truth_e", "own_truth_n", "own_truth_u",
     "truth_roll", "truth_pitch", "truth_yaw",
     "raw_u", "raw_v", "raw_s", "det_age", "track_reason", "cam_age",
-    "vc_mps", "u_rate", "pn_roll",
+    "vc_mps", "u_rate", "pn_roll", "v_proxy", "pitch_floor",
 ]
 
 
@@ -921,7 +921,7 @@ def main() -> int:
                 ((raw_bbox[2] - raw_bbox[0]) if raw_bbox is not None else float("nan")),
                 raw_age, track.reason,
                 (camera.age_s if camera is not None else float("nan")),
-                cmd.vc_mps, cmd.u_rate_px_s, cmd.pn_roll_deg,
+                cmd.vc_mps, cmd.u_rate_px_s, cmd.pn_roll_deg, cmd.v_proxy_mps, cmd.pitch_floor_deg,
             ])
 
             # ---- 判断 Gazebo 实拍是否跟随机体（本机 gz-sim 会定格）----

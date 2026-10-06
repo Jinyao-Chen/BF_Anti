@@ -89,6 +89,8 @@ class PStrikeCommand:
     vc_mps: float = 0.0          # 该帧实际使用的接近速度 Vc
     u_rate_px_s: float = 0.0     # 该帧实际喂入的框中心水平像素速率
     pn_roll_deg: float = 0.0     # 该帧比例导引项贡献的滚转（度）
+    v_proxy_mps: float = 0.0     # 该帧速度代理（speed_source=closing 时是纯视觉合成速度）
+    pitch_floor_deg: float = 0.0  # 该帧实际生效的低头下限（超速治理/对准门/低空保护的结果）
 
     # 控制量
     roll_cmd_deg: float = 0.0
@@ -242,7 +244,8 @@ class PVisualGuidance:
         self.pn_vc_min_mps = float(pn_vc_min_mps)       # Vc 钳位：避免增益被噪声调 15 倍
         self.pn_vc_max_mps = float(pn_vc_max_mps)
         self._lam_dps: Optional[float] = None           # λ̇ 机体系低通状态（量测调理）
-        self._lam_inertial_dps: Optional[float] = None  # λ̇ 惯性系（机体系 + 偏航速率）
+        self._lam_inertial_dps: Optional[float] = None  # λ̇（惯性系，由 az_los 窗口差分得到）
+        self._az_hist: list = []         # az_los 历史（量测调理，估视线角速率用）
         # 超速治理/爬升限幅用哪个量当"速度"：fc=飞控速度（默认）；closing=视觉接近率
         # （无 GPS/光流真机的替代方案，纯视觉）。
         self.speed_source = str(speed_source)
@@ -420,13 +423,30 @@ class PVisualGuidance:
         # 纯视觉测距 / 测高（bbox 宽度代理）
         # 上钳位：框被压缩到 min_bbox_px 时反算距离会飙到几百米（实测 z_t_est 峰峰 816 m），
         # 垂直通道会被带成全油门爬升。交战距离 < 50 m，钳到 150 m 只是防呆。
-        range_est = float(self.intrinsics.fx * self.target_width_m / max(s_px, 1e-3))
+        range_raw = float(self.intrinsics.fx * self.target_width_m / max(s_px, 1e-3))
         if self.range_max_m > 0.0:
-            range_est = min(range_est, self.range_max_m)
+            range_raw = min(range_raw, self.range_max_m)
+        # 测距低通（量测调理）——**统一在这里平滑一次，下面全部用 range_s**。
+        # 理由（2026-10-06 实测）：远距 bbox 只有 ~20 px，抖 1.5 px 就是 ~7% 距离误差，
+        # 45 m 处 `range_est` 逐帧摆动 ±6 m。这个噪声会同时毒到两条链：
+        #   ① z_target_est 抖 -> 油门峰峰 550 RC、每段零穿 10 次（高度振荡）
+        #   ② 接近率抖 -> 速度代理假报 25 m/s -> 超速治理把低头限到 0 度 ->
+        #      飞机 13 s 只爬到 2 m/s（"打击速度不够"）
+        # 只有命中判据仍用原始框宽 s_px；近距离（< range_lpf_min_range_m）框大、
+        # 测距本身准，按原设计不滤波以免引入滞后。
+        if self.range_lpf_tau_s > 0.0 and range_raw > self.range_lpf_min_range_m:
+            ar = float(dt) / (self.range_lpf_tau_s + float(dt))
+            self._r_filt = (range_raw if self._r_filt is None
+                            else self._r_filt + ar * (range_raw - self._r_filt))
+            range_s = float(self._r_filt)
+        else:
+            self._r_filt = None          # 出滤波区即复位，回到终端时不留旧值
+            range_s = range_raw
+        range_est = range_s              # 下游（τ / 阶段判定 / PN 的 Vc / 速度代理）统一用平滑值
         # 从下方向上打：垂直通道瞄准视线**下方** aim_below_deg 处，机体便始终吊在
         # 目标下方、保持上升着撞上去（俯仰仍用真实 el_los，相机继续咬住目标）。
         el_aim = el_los - self.aim_below_deg
-        z_target_est = z_own + range_est * float(np.sin(np.deg2rad(el_aim)))
+        z_target_est = z_own + range_s * float(np.sin(np.deg2rad(el_aim)))
         if self.vz_lpf_tau_s > 0.0:
             if self._z_ref_filt is None:
                 self._z_ref_filt = z_target_est
@@ -439,21 +459,14 @@ class PVisualGuidance:
 
         # 剩余飞行时间 τ = 距离/接近速度（连续两帧视觉测距差分，纯测量量）
         # 测距低通 + 接近率限幅 + 接近率低通：三者都只是**量测调理**，不改 P 律结构。
-        if self.range_lpf_tau_s > 0.0 and range_est > self.range_lpf_min_range_m:
-            ar = float(dt) / (self.range_lpf_tau_s + float(dt))
-            self._r_filt = (range_est if self._r_filt is None
-                            else self._r_filt + ar * (range_est - self._r_filt))
-            range_for_tau = float(self._r_filt)
-        else:
-            self._r_filt = None          # 出滤波区即复位，回到终端时不留旧值
-            range_for_tau = range_est
+        range_for_tau = range_s
         # 接近速度：短窗端点差（默认 8 帧 ≈ 0.4 s）代替单帧差分。
         # 旧做法把单帧差分**单边**钳到 [0.5, 25]：距离估计有 ±20% 噪声时，
         # "看起来在远离"的那些帧被钳成 +0.5，EMA 结果系统性偏低 —— 实测终端
         # 真值 5~8 m/s 而估计只有 3.2 m/s，超速治理因此不动作，无人机以 8.6 m/s
         # 冲过目标后只能绕大圈回来。这里改成有符号的窗口斜率，无偏。
-        if np.isfinite(range_est):
-            self._range_hist.append((float(timestamp), float(range_est)))
+        if np.isfinite(range_s):
+            self._range_hist.append((float(timestamp), float(range_s)))
         if len(self._range_hist) > self.closing_fit_n:
             del self._range_hist[0: len(self._range_hist) - self.closing_fit_n]
         if len(self._range_hist) >= 2:
@@ -471,37 +484,33 @@ class PVisualGuidance:
         # ---- 视线角速率 λ̇（量测调理，供比例导引项与视觉速度代理用）----
         # λ̇ ≈ u_dot / fx；u_dot 取自跟踪器的框中心像素速率。它逐帧抖动极大
         # （实测 |u_dot| 中位 80、p90 274、峰 766 px/s），必须先低通再进任何控制量。
-        # 机体偏航速率（量测调理）：机体绕 z 转动会让目标在**图像里**横扫，
-        # 但那不是视线转动 —— 必须补偿掉，否则回头/绕圈时 r·λ̇ 假报到上百 m/s，
-        # 把速度代理与比例导引项一起带飞（实测丢锁后无人机被"限速"到 0.3 m/s 干等）。
-        yaw_rate_dps = 0.0
-        if self._yaw_prev is not None and dt > 0.0:
-            dyaw = (float(yaw_own) - self._yaw_prev + 180.0) % 360.0 - 180.0
-            raw_yaw_rate = dyaw / float(dt)
-            self._yaw_rate_dps = (raw_yaw_rate if self._yaw_rate_dps is None
-                                  else self._yaw_rate_dps
-                                  + 0.5 * (raw_yaw_rate - self._yaw_rate_dps))
-        self._yaw_prev = float(yaw_own)
-        if self._yaw_rate_dps is not None:
-            yaw_rate_dps = float(self._yaw_rate_dps)
-
-        # **只在拿到新鲜像素速率的那一帧更新**：u̇ 是 0 阶保持量（跟踪器在真有检测的
-        # 13 Hz 才更新，控制回路 20 Hz），若在缺帧的 tick 上再叠加**新鲜**的偏航速率，
-        # 合成值会假报 λ̇≈ψ̇ —— 起飞段航向对准时 ψ̇ 有 -20~-60 dps，比例导引项被顶到
-        # -8 度限幅，飞机就向左压坡度、向左漂（实测 8 s 漂 2.65 m）。缺帧时保持上一帧。
-        if u_rate_px_s is not None:
-            lam_raw_dps = float(np.rad2deg(float(u_rate_px_s) /
-                                           max(1e-6, float(self.intrinsics.fx))))
-            if self.pn_rate_lpf_s > 0.0:
-                a_rate = float(dt) / (self.pn_rate_lpf_s + float(dt))
-                self._lam_dps = (lam_raw_dps if self._lam_dps is None
-                                 else self._lam_dps + a_rate * (lam_raw_dps - self._lam_dps))
-                lam_body_dps = float(self._lam_dps)
-            else:
-                lam_body_dps = lam_raw_dps
-            # 视线角速率（惯性系）= 机体系速率 + 机体偏航速率（见上）
-            self._lam_inertial_dps = lam_body_dps + yaw_rate_dps
-        lam_dps = float(self._lam_inertial_dps) if self._lam_inertial_dps is not None else 0.0
+        # 视线角速率 λ̇：用**几何量 az_los 的历史**做端点差（默认 0.4 s 窗），
+        # 不再用"框中心像素速率 + 偏航速率补偿"。换掉的理由（2026-10-06 实测）：
+        #   ① az_los 本身就是**惯性系**方位（像素 + 本机姿态换算而来）→ 不需要偏航补偿；
+        #   ② 机上航向是**整数度**（MSP_ATTITUDE 的 yaw 字段），逐帧差分得到 ±20 dps 的
+        #      量化噪声，乘上 N·Vc 后把比例导引项打成 ±8 度、6~7 Hz 的 bang-bang：
+        #      实测 roll_cmd 零穿频率从 2.9 Hz(无 PN) 涨到 7.0 Hz，机体滚转率峰峰 100 dps
+        #      —— 这就是"PID 震荡很严重"的来源；
+        #   ③ 与测距同窗（0.4 s），两个速率在时间上一致。
+        if fresh:
+            self._az_hist.append((float(timestamp), float(az_los)))
+            if len(self._az_hist) > self.closing_fit_n:
+                del self._az_hist[0: len(self._az_hist) - self.closing_fit_n]
+        lam_raw_dps = 0.0
+        if len(self._az_hist) >= 2:
+            t_a0, az_a0 = self._az_hist[0]
+            t_a1, az_a1 = self._az_hist[-1]
+            if t_a1 - t_a0 > 1e-3:
+                d_az = (az_a1 - az_a0 + 180.0) % 360.0 - 180.0
+                lam_raw_dps = d_az / (t_a1 - t_a0)
+        if self.pn_rate_lpf_s > 0.0:
+            a_rate = float(dt) / (self.pn_rate_lpf_s + float(dt))
+            self._lam_dps = (lam_raw_dps if self._lam_dps is None
+                             else self._lam_dps + a_rate * (lam_raw_dps - self._lam_dps))
+            lam_dps = float(self._lam_dps)
+        else:
+            lam_dps = lam_raw_dps
+        self._lam_inertial_dps = lam_dps
         u_rate_px_s_raw = float(u_rate_px_s) if u_rate_px_s is not None else 0.0
 
         # 纯视觉速度大小代理：sqrt(接近率² + (r·λ̇)²)（目标静止时即相对速度大小）。
@@ -554,7 +563,7 @@ class PVisualGuidance:
         # 注意：u_dot 是**机体系**像素速率，与惯性系视线角速率差一个机体系转动项（低偏航速率下可忽略）。
         pn_roll_deg = 0.0
         vc_pn = float(np.clip(self._closing_mps, self.pn_vc_min_mps, self.pn_vc_max_mps))
-        if (self.pn_gain > 0.0 and u_rate_px_s is not None
+        if (self.pn_gain > 0.0
                 and range_est > self.terminal_range_m
                 and v_horiz_proxy > self.pn_min_speed_mps):
             # 终端段（bbox 撑满）不用它：那时像素速率爆掉、几何由追踪项主导。
@@ -639,6 +648,7 @@ class PVisualGuidance:
         max_pitch = self.max_pitch_up_deg
         min_pitch = max(-self.max_pitch_down_deg, -15.0) if low_guard else -self.max_pitch_down_deg
         min_pitch = max(min_pitch, speed_floor)   # 超速时抬高低头下限（见上）
+        pitch_floor_used_deg = float(min_pitch)
         pitch_cmd = _clamp(pitch_cmd, min_pitch, max_pitch)
         roll_cmd = _clamp(roll_cmd, -self.max_roll_deg, self.max_roll_deg)
         yaw_rate = _clamp(yaw_rate, -self.max_yaw_rate_dps, self.max_yaw_rate_dps)
@@ -700,6 +710,8 @@ class PVisualGuidance:
             vc_mps=vc_used_mps,
             u_rate_px_s=u_rate_used,
             pn_roll_deg=pn_roll_deg,
+            v_proxy_mps=v_horiz_proxy,
+            pitch_floor_deg=pitch_floor_used_deg,
         )
         self._last_cmd = cmd          # COAST 保持用（不是控制动态）
         return cmd

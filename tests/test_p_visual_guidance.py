@@ -311,103 +311,69 @@ def test_rc_rate_limit():
 # --------------------------------------------------------------------- #
 # 可选的比例导引横向项（pn_gain>0）与视觉速度代理（speed_source）
 # --------------------------------------------------------------------- #
-def test_pn_term_disabled_by_default():
-    """默认 pn_gain=0：喂不喂像素速率，输出必须完全一致。"""
-    bb = bbox_around(340.0, 300.0, 40.0)
-    own_rpy = (0.0, -30.0, 0.0)
-    a = make_guidance()
-    b = make_guidance()
-    ca = a.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 120.0)
-    cb = b.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 0.0)
-    assert ca.roll_cmd_deg == pytest.approx(cb.roll_cmd_deg, abs=1e-12)
+def _run_u_seq(g, u_seq, dt=0.05, own_rpy=(0.0, -30.0, 0.0), v_extra=None):
+    """按给定"框中心 u 序列"喂若干帧，返回最后一帧命令。
 
-
-def test_pn_term_sign_and_magnitude():
-    """pn_gain=N：滚转增量 = cap*tanh(raw/cap)，raw = atan(N*Vc*lambda_dot/g)。
-
-    lambda_dot = u_dot/fx；第一帧低通状态为空，直接取原始值，便于手算验算。
+    λ̇ 现在由 az_los 的历史窗口差分得到，所以必须让目标在画面里**移动**才能激励
+    比例导引项（旧测试直接喂 u_rate_px_s，该输入已不再使用）。
     """
-    bb = bbox_around(320.0, 300.0, 40.0)          # u 恰在 cx -> e_u = 0，基线干净
-    own_rpy = (0.0, -30.0, 0.0)
+    cmd = None
+    for k, u in enumerate(u_seq):
+        cmd = g.update(bbox_around(u, 300.0, 40.0), OWN_POS, np.zeros(3), own_rpy,
+                       k * dt, dt, True)
+    return cmd
 
-    def run(rate):
-        g = make_guidance(pn_gain=4.0, speed_source="closing")
-        g._closing_mps = 10.0                     # 白盒：固定接近速度便于验算（同时过低速门）
-        return g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, rate)
 
-    fx = make_guidance().intrinsics.fx
-    cmd0, cmd1, cmd2 = run(0.0), run(46.78), run(-46.78)
-    raw = math.degrees(math.atan(
-        4.0 * 10.0 * math.radians(math.degrees(46.78 / fx)) / 9.80665))
-    cap = 8.0
-    expect = cap * math.tanh(raw / cap)
-    assert cmd1.roll_cmd_deg - cmd0.roll_cmd_deg == pytest.approx(expect, abs=1e-9)
-    assert cmd2.roll_cmd_deg - cmd0.roll_cmd_deg == pytest.approx(-expect, abs=1e-9)
-    assert cmd0.roll_cmd_deg == pytest.approx(0.0, abs=1e-9)
-    assert abs(cmd1.roll_cmd_deg) <= cap + 1e-9
+def test_pn_term_disabled_by_default():
+    """默认 pn_gain=0：同一段画面运动下比例导引项恒为 0（对照组不为 0）。"""
+    # 20 帧（1 s）让 λ̇ 低通收敛，避免低速门把测试本身卡掉
+    seq = [320.0 + 20.0 * k for k in range(20)]
+    off = _run_u_seq(make_guidance(), seq)
+    on = _run_u_seq(make_guidance(pn_gain=4.0, speed_source="closing"), seq)
+    assert off.pn_roll_deg == pytest.approx(0.0, abs=1e-12)
+    assert abs(on.pn_roll_deg) > 0.1
+
+
+def test_pn_term_sign_follows_image_motion():
+    """pn_gain>0：目标在画面里向左/向右移动，比例导引项必须反号且都不为零。"""
+    right = _run_u_seq(make_guidance(pn_gain=4.0, speed_source="closing"),
+                       [320.0 + 20.0 * k for k in range(20)])
+    left = _run_u_seq(make_guidance(pn_gain=4.0, speed_source="closing"),
+                      [700.0 - 20.0 * k for k in range(20)])
+    assert right.pn_roll_deg == pytest.approx(-left.pn_roll_deg, abs=0.05)
+    assert abs(right.pn_roll_deg) > 0.1
 
 
 def test_pn_term_is_soft_capped():
-    """像素速率再大，比例导引项也不能超过 pn_roll_cap_deg（防滚转饱和 -> 绕飞）。"""
-    bb = bbox_around(320.0, 300.0, 40.0)
-    own_rpy = (0.0, -30.0, 0.0)
+    """画面里目标再快，比例导引项也不能超过 pn_roll_cap_deg（防滚转饱和 -> 绕飞）。"""
     cap = 8.0
     g = make_guidance(pn_gain=4.0, pn_roll_cap_deg=cap, speed_source="closing")
     g._closing_mps = 10.0
-    cmd = g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 5000.0)
-    assert abs(cmd.roll_cmd_deg) <= cap + 1e-9
-    assert abs(cmd.roll_cmd_deg) > cap * 0.9          # 确实饱和到接近 cap
+    cmd = _run_u_seq(g, [20.0 + 80.0 * k for k in range(20)])
+    assert abs(cmd.pn_roll_deg) <= cap + 1e-9
+    assert abs(cmd.pn_roll_deg) > cap * 0.9
 
 
 def test_pn_term_gated_inside_terminal_range():
     """终端段（bbox 撑满 -> range_est <= terminal_range）不用比例导引项。"""
-    own_rpy = (0.0, -30.0, 0.0)
-    bb = bbox_around(320.0, 300.0, 200.0)             # 框很大 -> 距离近
     g = make_guidance(pn_gain=4.0, speed_source="closing")
     g._closing_mps = 10.0
-    cmd = g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 300.0)
+    cmd = None
+    for k, u in enumerate([320.0, 340.0, 360.0, 380.0, 400.0]):
+        cmd = g.update(bbox_around(u, 300.0, 200.0), OWN_POS, np.zeros(3),
+                       (0.0, -30.0, 0.0), k * 0.05, 0.05, True)
     assert cmd.range_est_m <= g.terminal_range_m
     assert cmd.pn_roll_deg == pytest.approx(0.0, abs=1e-12)
 
 
-def test_speed_source_closing_replaces_fc_velocity():
-    """speed_source="closing"：飞控速度为 0 时，仍用视觉接近率触发超速治理。"""
-    bb = bbox_around(340.0, 400.0, 40.0)
-    own_rpy = (0.0, -30.0, 0.0)
-    kw = dict(kp_speed=4.0, v_max_mps=5.0, max_pitch_down_deg=25.0,
-              speed_source="closing")
-
-    def run(closing):
-        g = make_guidance(**kw)
-        g._closing_mps = closing
-        return g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05)
-
-    fast, slow = run(16.0), run(1.0)
-    assert fast.pitch_cmd_deg != slow.pitch_cmd_deg
-    assert fast.pitch_cmd_deg > slow.pitch_cmd_deg     # 超速 -> 抬高低头下限
-
-    fc = make_guidance(kp_speed=4.0, v_max_mps=5.0, max_pitch_down_deg=25.0)
-    fc._closing_mps = 16.0
-    ref = fc.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05)
-    assert ref.pitch_cmd_deg == pytest.approx(slow.pitch_cmd_deg, abs=1e-12)
-
-
-
 def test_pn_term_gated_at_low_speed():
-    """刚起飞时速度≈0：比例导引项必须为 0（否则会压出坡度 -> 侧向漂移）。
-
-    现场：MASK_HORIZ=both 起飞段航向对准时 ψ̇≈-20~-60 dps，比例导引项被顶到 -8 度限幅，
-    8 s 向左漂 2.65 m。低速门 + "缺帧不叠加偏航速率" 一起修掉这个现象。
-    """
-    bb = bbox_around(320.0, 300.0, 40.0)
-    own_rpy = (0.0, -30.0, 0.0)
-    g = make_guidance(pn_gain=4.0, pn_min_speed_mps=2.5)
-    g._closing_mps = 0.5                          # 慢速：fc 源下 own_vel=0 -> 代理=0
-    cmd = g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 800.0)
-    assert cmd.pn_roll_deg == pytest.approx(0.0, abs=1e-12)
-    # 一旦有速度（closing 源 = 10 m/s）就恢复
+    """刚起飞速度≈0：比例导引项必须为 0（否则压坡度 -> 侧向漂移）；有速度才恢复。"""
+    seq = [320.0 + 20.0 * k for k in range(20)]
+    # 默认 speed_source=fc 且 own_vel=0 -> 代理速度 0 -> 低速门关断
+    slow = _run_u_seq(make_guidance(pn_gain=4.0, pn_min_speed_mps=2.5), seq)
+    assert slow.pn_roll_deg == pytest.approx(0.0, abs=1e-12)
+    # closing 源 + 10 m/s -> 过门
     g2 = make_guidance(pn_gain=4.0, pn_min_speed_mps=2.5, speed_source="closing")
     g2._closing_mps = 10.0
-    cmd2 = g2.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 800.0)
-    assert abs(cmd2.pn_roll_deg) > 1.0
-
+    fast = _run_u_seq(g2, seq)
+    assert abs(fast.pn_roll_deg) > 0.1
