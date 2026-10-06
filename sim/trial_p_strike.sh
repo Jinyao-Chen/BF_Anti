@@ -14,6 +14,11 @@ if ! python3 -c "import socket;socket.create_connection(('${YOLO_HOST}',${YOLO_P
     echo "[${NAME}] ABORT: YOLO 后端 ${YOLO_HOST}:${YOLO_PORT} 不可用（隧道: ssh -N -L ${YOLO_PORT}:127.0.0.1:9300 GPU_USER@GPU_HOST）"
     exit 2
 fi
+# 输入降级预演（sim2real）：MASK_HORIZ=none|pos|vel|both，见 run_p_vision_strike.py 帮助
+MASK_ARGS=()
+if [ -n "${MASK_HORIZ:-}" ] && [ "${MASK_HORIZ}" != "none" ]; then
+    MASK_ARGS=(--mask-own-horiz "${MASK_HORIZ}")
+fi
 DUMP_ARGS=()
 if [ -n "${DUMP_DIR:-}" ]; then
     mkdir -p "${DUMP_DIR}/${NAME}"
@@ -35,7 +40,7 @@ timeout 90 python3 sim/run_p_vision_strike.py --yolo-host "${YOLO_HOST}" --yolo-
     --err-soft 0.35 --tau-max 3.0 --velalign-min-speed 2.5 --velalign-soft 10 \
     --range-lpf 0.25 --closing-max 25 --vmax-close-range 12 --vmax-close-floor 3 \
     --reacquire-angle 60 --reacquire-rate 200 \
-    "${DUMP_ARGS[@]}" --log "$LOG" "$@" > "/tmp/trial_${NAME}.out" 2>&1
+    "${MASK_ARGS[@]}" "${DUMP_ARGS[@]}" --log "$LOG" "$@" > "/tmp/trial_${NAME}.out" 2>&1
 MIN=$(python3 -c "
 import csv
 try:

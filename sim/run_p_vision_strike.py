@@ -232,6 +232,38 @@ def read_own(link) -> Optional[dict]:
     return out if len(out) == 3 else None
 
 
+def mask_own_horizontal(own: dict, mode: str) -> dict:
+    """模拟"真机飞控给不出水平状态"（无 GPS / 无光流）的一种输入降级。
+
+    真机上 IMU 姿态与气压高度一定拿得到，水平位置/速度则取决于有没有 GPS 或光流。
+    本函数按 --mask-own-horiz 把水平分量清零，用来在仿真里预演无 GPS 真机：
+
+      none  原样（当前仿真配置）
+      pos   水平位置清零
+      vel   水平速度清零
+      both  两者都清零（最接近无 GPS/无光流的真机）
+
+    注意：制导律只用 own_pos[2]（高度）与 own_vel（速度矢量对齐 / 超速治理 /
+    沿视线爬升限幅）；水平位置在制导律里没有任何用处，所以 pos 单独清零近似无操作，
+    真正起作用的是 vel。这里的 mask 只作用于制导律的入参，日志、HUD 与
+    "相机陈旧"诊断仍用飞控原始状态，免得把仿真侧的诊断一起打瘸。
+    """
+    if mode == "none":
+        return own
+    out = dict(own)
+    pos = np.array(own["pos"], dtype=float).copy()
+    vel = np.array(own["vel"], dtype=float).copy()
+    if mode in ("pos", "both"):
+        pos[0] = 0.0
+        pos[1] = 0.0
+    if mode in ("vel", "both"):
+        vel[0] = 0.0
+        vel[1] = 0.0
+    out["pos"] = pos
+    out["vel"] = vel
+    return out
+
+
 def wrap180_deg(angle: float) -> float:
     return (float(angle) + 180.0) % 360.0 - 180.0
 
@@ -393,6 +425,11 @@ def main() -> int:
     parser.add_argument("--cam-link", default="base_link",
                         help="相机所在 link（顶层 fixed-joint 相机为 cam_link）")
     parser.add_argument("--target", default="target_drone")
+    parser.add_argument("--mask-own-horiz", choices=("none", "pos", "vel", "both"),
+                        default="none",
+                        help="预演无 GPS/无光流真机：把飞控给的水平位置/速度对制导律清零"
+                             "（none=原样；pos/vel/both）。制导律只用 pos[2] 与 vel，"
+                             "所以起作用的是 vel")
     parser.add_argument("--tilt", type=float, default=44.0)
     parser.add_argument("--hfov", type=float, default=68.75)
     parser.add_argument("--target-width", type=float, default=0.55)
@@ -585,6 +622,9 @@ def main() -> int:
     intr = guidance.intrinsics
     extr = CameraExtrinsics(tilt_deg=args.tilt)
     source = GazeboPoseSource(args.world, args.interceptor, args.target)
+    if args.mask_own_horiz != "none":
+        print("[mask] 制导律入参屏蔽水平状态: %s  （预演无 GPS/无光流真机）"
+              % args.mask_own_horiz, flush=True)
 
     yolo = None
     if not args.synthetic:
@@ -682,6 +722,8 @@ def main() -> int:
             if own is None:
                 time.sleep(period)
                 continue
+            # 制导律入参（可能与飞控原始状态不同：见 --mask-own-horiz）
+            own_cmd = mask_own_horizontal(own, args.mask_own_horiz)
             pose = source.pose()
             # 每周期必须重新取帧：真 YOLO 吃的是这张图（此前只在循环外取过一次，
             # 导致检测框整场冻结在首帧；合成模式不看 frame 所以一直没暴露）。
@@ -773,7 +815,7 @@ def main() -> int:
                        own["rpy"][2])
 
             if locked:
-                cmd = guidance.update(bbox, own["pos"], own["vel"], own_rpy, now, period,
+                cmd = guidance.update(bbox, own_cmd["pos"], own_cmd["vel"], own_rpy, now, period,
                                       fresh=fresh_meas)
                 if args.vertical == "althold" and now - last_alt_cmd > 0.05:
                     if cmd.valid:
@@ -788,7 +830,7 @@ def main() -> int:
             else:
                 # 扫描：在最后一次已知方位附近往返（有 cue 时不需要大范围扫）
                 sweep_center = guidance.az_last_deg
-                speed = float(np.linalg.norm(own["vel"][:2]))
+                speed = float(np.linalg.norm(own_cmd["vel"][:2]))
                 stage = args.stage_pitch
                 if sweep_center is None:
                     sweep = args.search_sweep * math.sin(
@@ -809,7 +851,7 @@ def main() -> int:
                 # 否则会在捕获前就加速飞过目标（早期实测：飞出 500 m）。
                 if speed > args.v_max:
                     stage = max(0.0, stage - args.kp_speed_search * (speed - args.v_max))
-                cmd = guidance.search_command(own["pos"], sweep, stage, own["vel"])
+                cmd = guidance.search_command(own_cmd["pos"], sweep, stage, own_cmd["vel"])
                 if elapsed > args.acquire_timeout:
                     print("ERROR: 超时未捕获目标", flush=True)
                     break
@@ -1001,6 +1043,7 @@ def main() -> int:
     print(f"hit (bbox 判据) : {hit}")
     print(f"min truth range: {min_truth_range:.3f} m")
     print(f"rejected boxes : {rejected_frames} (画面外/无效)")
+    print(f"mask own horiz : {args.mask_own_horiz}")
     if final_cmd is not None:
         print(f"final phase    : {final_cmd.phase.value}")
         print(f"final est range: {final_cmd.range_est_m:.3f} m")
