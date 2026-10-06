@@ -331,8 +331,8 @@ def test_pn_term_sign_and_magnitude():
     own_rpy = (0.0, -30.0, 0.0)
 
     def run(rate):
-        g = make_guidance(pn_gain=4.0)
-        g._closing_mps = 10.0                     # 白盒：固定接近速度便于验算
+        g = make_guidance(pn_gain=4.0, speed_source="closing")
+        g._closing_mps = 10.0                     # 白盒：固定接近速度便于验算（同时过低速门）
         return g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, rate)
 
     fx = make_guidance().intrinsics.fx
@@ -352,7 +352,7 @@ def test_pn_term_is_soft_capped():
     bb = bbox_around(320.0, 300.0, 40.0)
     own_rpy = (0.0, -30.0, 0.0)
     cap = 8.0
-    g = make_guidance(pn_gain=4.0, pn_roll_cap_deg=cap)
+    g = make_guidance(pn_gain=4.0, pn_roll_cap_deg=cap, speed_source="closing")
     g._closing_mps = 10.0
     cmd = g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 5000.0)
     assert abs(cmd.roll_cmd_deg) <= cap + 1e-9
@@ -363,7 +363,7 @@ def test_pn_term_gated_inside_terminal_range():
     """终端段（bbox 撑满 -> range_est <= terminal_range）不用比例导引项。"""
     own_rpy = (0.0, -30.0, 0.0)
     bb = bbox_around(320.0, 300.0, 200.0)             # 框很大 -> 距离近
-    g = make_guidance(pn_gain=4.0)
+    g = make_guidance(pn_gain=4.0, speed_source="closing")
     g._closing_mps = 10.0
     cmd = g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 300.0)
     assert cmd.range_est_m <= g.terminal_range_m
@@ -390,4 +390,24 @@ def test_speed_source_closing_replaces_fc_velocity():
     fc._closing_mps = 16.0
     ref = fc.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05)
     assert ref.pitch_cmd_deg == pytest.approx(slow.pitch_cmd_deg, abs=1e-12)
+
+
+
+def test_pn_term_gated_at_low_speed():
+    """刚起飞时速度≈0：比例导引项必须为 0（否则会压出坡度 -> 侧向漂移）。
+
+    现场：MASK_HORIZ=both 起飞段航向对准时 ψ̇≈-20~-60 dps，比例导引项被顶到 -8 度限幅，
+    8 s 向左漂 2.65 m。低速门 + "缺帧不叠加偏航速率" 一起修掉这个现象。
+    """
+    bb = bbox_around(320.0, 300.0, 40.0)
+    own_rpy = (0.0, -30.0, 0.0)
+    g = make_guidance(pn_gain=4.0, pn_min_speed_mps=2.5)
+    g._closing_mps = 0.5                          # 慢速：fc 源下 own_vel=0 -> 代理=0
+    cmd = g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 800.0)
+    assert cmd.pn_roll_deg == pytest.approx(0.0, abs=1e-12)
+    # 一旦有速度（closing 源 = 10 m/s）就恢复
+    g2 = make_guidance(pn_gain=4.0, pn_min_speed_mps=2.5, speed_source="closing")
+    g2._closing_mps = 10.0
+    cmd2 = g2.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 800.0)
+    assert abs(cmd2.pn_roll_deg) > 1.0
 

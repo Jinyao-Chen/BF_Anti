@@ -150,12 +150,15 @@ class PVisualGuidance:
         velalign_full_speed: float = 4.5,
         velalign_soft_deg: float = 10.0,
         pn_gain: float = 0.0,
+        pn_min_speed_mps: float = 2.5,
         pn_rate_lpf_s: float = 0.35,
         pn_roll_cap_deg: float = 8.0,
         pn_vc_min_mps: float = 2.0,
         pn_vc_max_mps: float = 12.0,
         speed_source: str = "fc",
         align_gate: float = 0.15,
+        roll_align_gate: float = 0.0,
+        roll_align_soft: float = 0.10,
         align_pitch_limit_deg: float = 8.0,
         align_gate_lpf_s: float = 0.15,
         soft_start_s: float = 0.0,
@@ -229,13 +232,17 @@ class PVisualGuidance:
         #   a_pn = N * Vc * lambda_dot  ->  折算成滚转指令。需要外部喂入像素速率，
         #   本身不含时间状态；但它的物理含义是视线角速率，启用即**超出纯 P 契约**。
         self.pn_gain = float(pn_gain)
+        # 低速门（与 velalign 同样的动机）：起飞/悬停时速度≈0，横向加速度指令既无效
+        # 又会把飞机压出坡度 -> 侧向漂移；对准由偏航通道负责。
+        self.pn_min_speed_mps = float(pn_min_speed_mps)
         # λ̇ 的量测调理与限幅（实测 |u̇| 中位 80、峰 766 px/s，逐帧抖动极大；
         # 不调理直接乘 N·Vc 会算出 50~78 度的滚转指令 -> 滚转持续饱和 -> 绕飞）。
         self.pn_rate_lpf_s = float(pn_rate_lpf_s)
         self.pn_roll_cap_deg = float(pn_roll_cap_deg)   # 软饱和上限：pn 项永不主导
         self.pn_vc_min_mps = float(pn_vc_min_mps)       # Vc 钳位：避免增益被噪声调 15 倍
         self.pn_vc_max_mps = float(pn_vc_max_mps)
-        self._lam_dps: Optional[float] = None           # λ̇ 低通状态（量测调理）
+        self._lam_dps: Optional[float] = None           # λ̇ 机体系低通状态（量测调理）
+        self._lam_inertial_dps: Optional[float] = None  # λ̇ 惯性系（机体系 + 偏航速率）
         # 超速治理/爬升限幅用哪个量当"速度"：fc=飞控速度（默认）；closing=视觉接近率
         # （无 GPS/光流真机的替代方案，纯视觉）。
         self.speed_source = str(speed_source)
@@ -244,6 +251,10 @@ class PVisualGuidance:
         # 初始航向有偏差时留下稳定的横向速度（0.25 m/s → 1 m 横偏），这是终端
         # 脱靶 ~1 m 的直接来源；对准后再加速即可从源头消除。
         self.align_gate = float(align_gate)
+        # 横向对准门（默认关）：航向偏差超过 roll_align_gate 后按 tanh 衰减滚转指令，
+        # 让偏航先完成对准、不产生横向加速度（起飞段初始航向偏差 9~12 度会横向漂走）。
+        self.roll_align_gate = float(roll_align_gate)
+        self.roll_align_soft = float(roll_align_soft)
         # 门限判断用**滤波后**的横向误差：真机检测只有约 13 fps，e_u 逐帧噪声大，
         # 直接进门限会让"低头权限"整段被卡在 align_pitch_limit（实测 GUI 下发
         # pitch 全程钉在 -5°、加速不足、最后飞过）。滤波只影响门限判断，不改制导律。
@@ -474,20 +485,33 @@ class PVisualGuidance:
         if self._yaw_rate_dps is not None:
             yaw_rate_dps = float(self._yaw_rate_dps)
 
-        lam_raw_dps = 0.0
+        # **只在拿到新鲜像素速率的那一帧更新**：u̇ 是 0 阶保持量（跟踪器在真有检测的
+        # 13 Hz 才更新，控制回路 20 Hz），若在缺帧的 tick 上再叠加**新鲜**的偏航速率，
+        # 合成值会假报 λ̇≈ψ̇ —— 起飞段航向对准时 ψ̇ 有 -20~-60 dps，比例导引项被顶到
+        # -8 度限幅，飞机就向左压坡度、向左漂（实测 8 s 漂 2.65 m）。缺帧时保持上一帧。
         if u_rate_px_s is not None:
             lam_raw_dps = float(np.rad2deg(float(u_rate_px_s) /
                                            max(1e-6, float(self.intrinsics.fx))))
-        if self.pn_rate_lpf_s > 0.0:
-            a_rate = float(dt) / (self.pn_rate_lpf_s + float(dt))
-            self._lam_dps = (lam_raw_dps if self._lam_dps is None
-                             else self._lam_dps + a_rate * (lam_raw_dps - self._lam_dps))
-            lam_dps = float(self._lam_dps)
-        else:
-            lam_dps = lam_raw_dps
-        # 视线角速率（惯性系）= 机体系速率 + 机体偏航速率（见上）
-        lam_dps = lam_dps + yaw_rate_dps
+            if self.pn_rate_lpf_s > 0.0:
+                a_rate = float(dt) / (self.pn_rate_lpf_s + float(dt))
+                self._lam_dps = (lam_raw_dps if self._lam_dps is None
+                                 else self._lam_dps + a_rate * (lam_raw_dps - self._lam_dps))
+                lam_body_dps = float(self._lam_dps)
+            else:
+                lam_body_dps = lam_raw_dps
+            # 视线角速率（惯性系）= 机体系速率 + 机体偏航速率（见上）
+            self._lam_inertial_dps = lam_body_dps + yaw_rate_dps
+        lam_dps = float(self._lam_inertial_dps) if self._lam_inertial_dps is not None else 0.0
         u_rate_px_s_raw = float(u_rate_px_s) if u_rate_px_s is not None else 0.0
+
+        # 纯视觉速度大小代理：sqrt(接近率² + (r·λ̇)²)（目标静止时即相对速度大小）。
+        # 两处共用：① --speed-source closing 时作为速度量；② 比例导引项的低速门。
+        v_trans_mps = (abs(float(range_est) * float(np.deg2rad(lam_dps)))
+                       if np.isfinite(range_est) else 0.0)
+        if self.speed_source == "closing":
+            v_horiz_proxy = float(np.hypot(abs(float(self._closing_mps)), v_trans_mps))
+        else:
+            v_horiz_proxy = float(np.hypot(own_vel[0], own_vel[1]))
 
         # -------------------------------------------------------------- #
         # P 律
@@ -531,7 +555,8 @@ class PVisualGuidance:
         pn_roll_deg = 0.0
         vc_pn = float(np.clip(self._closing_mps, self.pn_vc_min_mps, self.pn_vc_max_mps))
         if (self.pn_gain > 0.0 and u_rate_px_s is not None
-                and range_est > self.terminal_range_m):
+                and range_est > self.terminal_range_m
+                and v_horiz_proxy > self.pn_min_speed_mps):
             # 终端段（bbox 撑满）不用它：那时像素速率爆掉、几何由追踪项主导。
             a_pn_mps2 = self.pn_gain * vc_pn * float(np.deg2rad(lam_dps))
             raw_deg = float(np.rad2deg(np.arctan(a_pn_mps2 / 9.80665)))
@@ -557,15 +582,7 @@ class PVisualGuidance:
         # 因此超速时只**限制最大低头角**，让目标停留在画面下半部继续可控。
         # 速度代理由 speed_source 决定：fc=飞控速度；closing=视觉接近率。
         # 迎头段测距变化率 ≈ 速度大小，因此无 GPS/光流时它是可用的替身。
-        if self.speed_source == "closing":
-            # 纯视觉速度大小代理：sqrt(接近率² + (r·λ̇)²)。
-            # 只用接近率是不够的：绕飞时径向接近率≈0 而真实速度 6-7 m/s，
-            # 治理会以为没超速 -> 终端不减速 -> 最小转弯半径 8 m > 命中半径 -> 绕圈。
-            v_trans = (abs(float(range_est) * float(np.deg2rad(lam_dps)))
-                       if np.isfinite(range_est) else 0.0)
-            v_horiz = float(np.hypot(abs(float(self._closing_mps)), v_trans))
-        else:
-            v_horiz = float(np.hypot(own_vel[0], own_vel[1]))
+        v_horiz = v_horiz_proxy      # 见上：与比例导引项的低速门共用同一个代理
         speed_floor = -self.max_pitch_down_deg
         # 终端限速：距离越近允许的速度上限越低（转弯半径 ∝ v²，近距离必须能咬住）
         v_max_eff = self.v_max_mps
@@ -595,18 +612,21 @@ class PVisualGuidance:
                           + (self.max_pitch_down_deg - self.align_pitch_limit_deg) * (1.0 - g))
             pitch_cmd = max(pitch_cmd, floor_deg)
 
+        # 横向对准门（可选，roll_align_gate>0 才启用）：|e_u| 超过门限后按 tanh 衰减
+        # 滚转指令 —— 航向还没对准时不产生横向加速度，先靠偏航把机头转过去。
+        # 动机：起飞段初始航向偏差 9~12°，滚转按"对准目标方位"把飞机横向推走（实测 8 s
+        # 向左漂 0.6~2.8 m）；门限取 3.4°(0.10) 以内不衰减，故跟踪/终端段不受影响。
+        if self.roll_align_gate > 0.0 and range_est > self.terminal_range_m:
+            g_roll = float(np.tanh(max(0.0, abs(e_u_gate) - self.roll_align_gate)
+                                  / max(1e-6, self.roll_align_soft)))
+            roll_cmd *= (1.0 - g_roll)
         # 高度环：两个 P 串联（高度误差→垂速指令，垂速误差→油门）。无 I、无 D。
         # 单 P 高度环在倾角升力损失下几乎无阻尼（实测 ±1.7 m 等幅振荡 → 终端脱靶），
         # 串联 P 用垂速反馈提供阻尼：ω=sqrt(kp_z*kp_vz*k_T*g)，ζ=kp_vz*k_T*g/(2ω)。
         # 沿视线爬升的几何上限（只限制"上升"，下降不限制）
         vz_limit = None
         if self.climb_along_los and np.isfinite(el_los):
-            if self.speed_source == "closing":
-                v_trans = (abs(float(range_est) * float(np.deg2rad(lam_dps)))
-                           if np.isfinite(range_est) else 0.0)
-                v_h = float(np.hypot(abs(float(self._closing_mps)), v_trans))
-            else:
-                v_h = float(np.hypot(own_vel[0], own_vel[1]))
+            v_h = v_horiz_proxy
             # 地板 3 m/s：起步阶段水平速度≈0，纯几何值会把爬升掐死（起飞都困难）
             vz_limit = max(abs(v_h * np.tan(np.deg2rad(el_los))), 3.0) + self.climb_margin_mps
         throttle = self._altitude_pwm_raw(z_own, float(own_vel[2]), z_target_est,

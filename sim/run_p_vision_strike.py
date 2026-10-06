@@ -389,6 +389,7 @@ def build_guidance(args, image_size) -> PVisualGuidance:
         lost_timeout_s=args.lost_timeout,
         kp_velalign=args.kp_velalign,
         pn_gain=args.pn_gain,
+        pn_min_speed_mps=args.pn_min_speed,
         speed_source=args.speed_source,
         velalign_min_speed=args.velalign_min_speed,
         velalign_soft_deg=args.velalign_soft,
@@ -398,6 +399,7 @@ def build_guidance(args, image_size) -> PVisualGuidance:
         vmax_close_range_m=args.vmax_close_range,
         vmax_close_floor_mps=args.vmax_close_floor,
         align_gate=args.align_gate,
+        roll_align_gate=args.roll_align_gate,
         align_gate_lpf_s=args.align_gate_lpf,
         err_soft=args.err_soft,
         align_pitch_limit_deg=args.align_pitch,
@@ -523,6 +525,10 @@ def main() -> int:
     parser.add_argument("--pop-up-z", type=float, default=3.0,
                         help="高度差小于该值即结束抬头段、交回常规律")
     parser.add_argument("--kp-speed", type=float, default=0.0)
+    parser.add_argument("--roll-align-gate", type=float, default=0.0,
+                        help="横向对准门（默认关）：|e_u| 超过此值后衰减滚转指令，"
+                             "避免起飞/回头段“航向未对准却先压坡度”造成横向漂移"
+                             "（0.10 ≈ 3.4 度）")
     parser.add_argument("--align-gate", type=float, default=0.15,
                         help="|e_u| 大于该值时限制低头（先对准再闭合）")
     parser.add_argument("--align-pitch", type=float, default=8.0)
@@ -538,6 +544,9 @@ def main() -> int:
                              "a=N*Vc*λ̇（λ̇ 取跟踪器框中心像素速率 / fx，Vc 取视觉接近率）"
                              "折算滚转指令，可替代依赖飞控速度的 velalign ——"
                              "但**启用即超出纯 P 契约**（引入视线角速率项）")
+    parser.add_argument("--pn-min-speed", type=float, default=2.5,
+                        help="比例导引项的低速门（m/s）：速度低于此值不产生横向加速度指令"
+                             "（起飞/悬停时对准交给偏航通道）")
     parser.add_argument("--speed-source", choices=("fc", "closing"), default="fc",
                         help="超速治理/爬升限幅的速度来源：fc=飞控速度（默认）；"
                              "closing=视觉接近率（无 GPS/光流真机的替代）")
