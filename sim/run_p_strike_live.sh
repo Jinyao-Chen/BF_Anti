@@ -37,6 +37,9 @@ YOLO_PORT="${YOLO_PORT:-$YOLO_PORT_DEFAULT}"
 # 所以 2.0 -> 2.38；不改这张表会让 z_t = r*sin(el) 系统性偏低。
 if [ "${YOLO_BACKEND}" = "onnx" ]; then TARGET_WIDTH_DEFAULT=2.38; else TARGET_WIDTH_DEFAULT=2.0; fi
 TARGET_WIDTH="${TARGET_WIDTH:-$TARGET_WIDTH_DEFAULT}"
+# MASK_HORIZ=none|pos|vel|both：把飞控给**制导律**的水平位置/速度清零，
+# 用来预演"无 GPS / 无光流"的真机（none=正常仿真）。见 run_p_vision_strike.py --help。
+MASK_HORIZ="${MASK_HORIZ:-none}"
 # YOLO_DIRECT=1: 不走 SSH 隧道，直接把检测服务放在 YOLO_HOST 上（例如 RDK X5 直连）。
 YOLO_DIRECT="${YOLO_DIRECT:-0}"
 # 远程拉起服务的命令（换板子/换机器时改这里；默认是 GPU 机上的 start_yolo.sh）。
@@ -139,7 +142,8 @@ else
 fi
 
 python3 "${SCRIPT_DIR}/run_p_vision_strike.py" \
-    ${DETECTOR} --show --video "${VIDEO}" --duration "${DURATION}" \
+    ${DETECTOR} --mask-own-horiz "${MASK_HORIZ}" \
+    --show --video "${VIDEO}" --duration "${DURATION}" \
     --inner-model "" --cam-link cam_link --view camera \
     --hover-pwm 1430 --tilt 20 --climb-alt ${CLIMB_ALT:-5} --stage-pitch 8 \
     --max-pitch-down 25 --angle-limit 40 --kp-pitch 13 --kp-yaw 220 --max-yaw-rate 300 \
