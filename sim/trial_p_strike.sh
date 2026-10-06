@@ -24,11 +24,29 @@ if [ -n "${DUMP_DIR:-}" ]; then
     mkdir -p "${DUMP_DIR}/${NAME}"
     DUMP_ARGS=(--dump-dir "${DUMP_DIR}/${NAME}" --dump-hz "${DUMP_HZ:-10}")
 fi
+echo "[${NAME}] 检测后端 ${YOLO_HOST}:${YOLO_PORT} 可用；重启仿真 ..."
 pkill -9 -f "gz sim" 2>/dev/null; pkill -9 -f betaflight_SITL 2>/dev/null; sleep 3
 BF_ROOT="$HOME/betaflight" BF_ANTI_WORLD="$PWD/sim/worlds/bf_anti_p_strike_light_cam.sdf" \
     ./sim/launch_sitl.sh --headless > "/tmp/trial_${NAME}_sim.log" 2>&1 &
 SIM_PID=$!
-sleep 52
+echo "[${NAME}] 启动 SITL+Gazebo(headless)，日志 /tmp/trial_${NAME}_sim.log"
+# 轮询 MSP 就绪（原来死等 52 s：既看不到进度，仿真起不来也照样往下跑）。
+# 仿真进程中途死掉要立刻报错退出，并把 sim 日志尾部打出来。
+READY=0
+for i in $(seq 1 75); do
+    if (exec 3<>/dev/tcp/127.0.0.1/5761) 2>/dev/null; then READY=1; break; fi
+    if ! kill -0 "${SIM_PID}" 2>/dev/null; then break; fi
+    sleep 1
+    [ $((i % 10)) -eq 0 ] && echo "[${NAME}]   ... 等待 MSP 就绪 ${i}s"
+done
+if [ "${READY}" != "1" ]; then
+    echo "[${NAME}] ABORT: SITL MSP(5761) 未就绪，仿真日志尾部："
+    tail -20 "/tmp/trial_${NAME}_sim.log"
+    kill "${SIM_PID}" 2>/dev/null; exit 3
+fi
+echo "[${NAME}] MSP 就绪；再等 40 s 让固件接管 FDM ..."
+sleep 40
+echo "[${NAME}] 开始打击（最长 90 s，逐秒进度写 /tmp/trial_${NAME}.out）"
 timeout 90 python3 sim/run_p_vision_strike.py --yolo-host "${YOLO_HOST}" --yolo-port "${YOLO_PORT}" \
     --min-conf 0.10 --inner-model "" --cam-link cam_link --view camera \
     --hover-pwm 1430 --tilt 20 --climb-alt 5 --stage-pitch 8 --duration 30 \
@@ -40,7 +58,15 @@ timeout 90 python3 sim/run_p_vision_strike.py --yolo-host "${YOLO_HOST}" --yolo-
     --err-soft 0.35 --tau-max 3.0 --velalign-min-speed 2.5 --velalign-soft 10 \
     --range-lpf 0.25 --closing-max 25 --vmax-close-range 12 --vmax-close-floor 3 \
     --reacquire-angle 60 --reacquire-rate 200 \
-    "${MASK_ARGS[@]}" "${DUMP_ARGS[@]}" --log "$LOG" "$@" > "/tmp/trial_${NAME}.out" 2>&1
+    "${MASK_ARGS[@]}" "${DUMP_ARGS[@]}" --log "$LOG" "$@" > "/tmp/trial_${NAME}.out" 2>&1 &
+RUN_PID=$!
+while kill -0 "${RUN_PID}" 2>/dev/null; do
+    sleep 10
+    if kill -0 "${RUN_PID}" 2>/dev/null; then
+        echo "[${NAME}]   ... $(tail -1 "/tmp/trial_${NAME}.out" 2>/dev/null | cut -c1-100)"
+    fi
+done
+wait "${RUN_PID}" 2>/dev/null
 MIN=$(python3 -c "
 import csv
 try:
