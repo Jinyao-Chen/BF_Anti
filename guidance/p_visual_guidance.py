@@ -145,6 +145,8 @@ class PVisualGuidance:
         velalign_min_speed: float = 2.5,
         velalign_full_speed: float = 4.5,
         velalign_soft_deg: float = 10.0,
+        pn_gain: float = 0.0,
+        speed_source: str = "fc",
         align_gate: float = 0.15,
         align_pitch_limit_deg: float = 8.0,
         align_gate_lpf_s: float = 0.15,
@@ -214,6 +216,13 @@ class PVisualGuidance:
         # 直接把 roll 打满 ±30°（坏样本 54% 帧饱和、横滚 ±330°/s 极限环），而好样本该项
         # 只有 ~5°（贡献 7° roll）。软饱和保留小偏差处的行为、封住大偏差处的 bang-bang。
         self.velalign_soft_deg = float(velalign_soft_deg)
+        # 比例导引横向项的可选增益 N（0 = 关闭，默认仍是纯 P）：
+        #   a_pn = N * Vc * lambda_dot  ->  折算成滚转指令。需要外部喂入像素速率，
+        #   本身不含时间状态；但它的物理含义是视线角速率，启用即**超出纯 P 契约**。
+        self.pn_gain = float(pn_gain)
+        # 超速治理/爬升限幅用哪个量当"速度"：fc=飞控速度（默认）；closing=视觉接近率
+        # （无 GPS/光流真机的替代方案，纯视觉）。
+        self.speed_source = str(speed_source)
         # 对准门限：水平误差大于 align_gate 时，把低头限制在 align_pitch_limit_deg 以内
         # （不产生前向加速度），等机头对准目标后再闭合。实测 "边加速边转向" 会在
         # 初始航向有偏差时留下稳定的横向速度（0.25 m/s → 1 m 横偏），这是终端
@@ -333,6 +342,7 @@ class PVisualGuidance:
         timestamp: float,
         dt: float = 0.05,
         fresh: bool = True,
+        u_rate_px_s: Optional[float] = None,
     ) -> PStrikeCommand:
         """一个控制周期。bbox 为 None/退化时进入 SEARCH 或 COAST。
 
@@ -340,7 +350,10 @@ class PVisualGuidance:
         此时绝对几何量（视线仰角/方位）沿用最后一次新鲜检测的值：外推框在像素上
         是冻住的，而机体姿态仍在变，若继续用 el_los = f(冻结像素, 实时姿态)，
         俯仰环就变成正反馈（pitch↑ -> el_los↑ -> pitch↑），实测 0.4 s 内顶到 +25°
-        限幅、目标掉出画面、整场失锁。**只冻结几何偏置，比例项仍用外推框。**"""
+        限幅、目标掉出画面、整场失锁。**只冻结几何偏置，比例项仍用外推框。**
+
+        可选参数 ``u_rate_px_s``：框中心的水平像素速率（px/s，由跟踪器提供）。仅在
+        ``pn_gain > 0`` 时用于比例导引横向项；不传等同于 0。"""
         own_pos = np.asarray(own_position_enu, dtype=float)[:3]
         own_vel = (np.zeros(3) if own_velocity_enu is None
                    else np.asarray(own_velocity_enu, dtype=float)[:3])
@@ -445,6 +458,18 @@ class PVisualGuidance:
             mis_soft = self.velalign_soft_deg * float(np.tanh(misalign / self.velalign_soft_deg))
             roll_cmd += self.kp_velalign * sp * mis_soft
 
+        # 比例导引横向项（可选：pn_gain>0 才启用，启用即**超出纯 P 契约**）：
+        #     a_pn = N * Vc * lambda_dot,   lambda_dot ≈ u_dot / fx   [rad/s]
+        #     Vc 用视觉测距差分（closing_mps，纯视觉），roll += atan(a_pn / g)
+        # 它和 velalign 修的是同一个问题（机头对准但航迹偏离），区别是只需要视觉量，
+        # 所以无 GPS/无光流的真机也能算。速率由感知层喂入（跟踪器的框中心速度），
+        # 制导律自身不新增任何时间状态（契约测试据此仍然通过）。
+        # 注意：u_dot 是**机体系**像素速率，与惯性系视线角速率差一个机体系转动项（低偏航速率下可忽略）。
+        if self.pn_gain > 0.0 and u_rate_px_s is not None:
+            lam_dot_rad_s = float(u_rate_px_s) / max(1e-6, float(self.intrinsics.fx))
+            a_pn_mps2 = self.pn_gain * float(self._closing_mps) * lam_dot_rad_s
+            roll_cmd += float(np.rad2deg(np.arctan(a_pn_mps2 / 9.80665)))
+
         pitch_bias = el_los - self.camera_tilt_deg
         pitch_cmd = pitch_bias - self.kp_pitch * e_v_cmd
         # 抬头爬升段：高度差还大时保持抬头（推力朝上、全力拔高），不做低头
@@ -460,7 +485,12 @@ class PVisualGuidance:
         # 固定前视相机下俯仰姿态就是指向，若把抬头量直接加进 pitch，会把光轴从
         # 目标上抬走 → 目标掉出画面（早期版本实测：kp_speed=6 时俯仰被 +54° 抵消）。
         # 因此超速时只**限制最大低头角**，让目标停留在画面下半部继续可控。
-        v_horiz = float(np.hypot(own_vel[0], own_vel[1]))
+        # 速度代理由 speed_source 决定：fc=飞控速度；closing=视觉接近率。
+        # 迎头段测距变化率 ≈ 速度大小，因此无 GPS/光流时它是可用的替身。
+        if self.speed_source == "closing":
+            v_horiz = abs(float(self._closing_mps))
+        else:
+            v_horiz = float(np.hypot(own_vel[0], own_vel[1]))
         speed_floor = -self.max_pitch_down_deg
         # 终端限速：距离越近允许的速度上限越低（转弯半径 ∝ v²，近距离必须能咬住）
         v_max_eff = self.v_max_mps
@@ -496,7 +526,8 @@ class PVisualGuidance:
         # 沿视线爬升的几何上限（只限制"上升"，下降不限制）
         vz_limit = None
         if self.climb_along_los and np.isfinite(el_los):
-            v_h = float(np.hypot(own_vel[0], own_vel[1]))
+            v_h = (abs(float(self._closing_mps)) if self.speed_source == "closing"
+                   else float(np.hypot(own_vel[0], own_vel[1])))
             # 地板 3 m/s：起步阶段水平速度≈0，纯几何值会把爬升掐死（起飞都困难）
             vz_limit = max(abs(v_h * np.tan(np.deg2rad(el_los))), 3.0) + self.climb_margin_mps
         throttle = self._altitude_pwm_raw(z_own, float(own_vel[2]), z_target_est,

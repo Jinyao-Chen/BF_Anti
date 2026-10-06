@@ -387,6 +387,8 @@ def build_guidance(args, image_size) -> PVisualGuidance:
         meas_lpf_alpha=args.meas_lpf,
         lost_timeout_s=args.lost_timeout,
         kp_velalign=args.kp_velalign,
+        pn_gain=args.pn_gain,
+        speed_source=args.speed_source,
         velalign_min_speed=args.velalign_min_speed,
         velalign_soft_deg=args.velalign_soft,
         range_lpf_tau_s=args.range_lpf,
@@ -530,6 +532,14 @@ def main() -> int:
     # 2026-09-29：东向速度符号修正后该项才第一次真正可用（此前 az_vel 的东向分量
     # 是镜像的）。实测 4/4 命中(0.559-0.766 m) 且 TRACK 帧 99%（关闭时 0/2 命中、
     # TRACK 仅 69-70%）：把速度矢量对到视线上，横向偏差从 0.49-0.85 m 降到 0.02-0.47 m。
+    parser.add_argument("--pn-gain", type=float, default=0.0,
+                        help="比例导引横向项增益 N（0=关闭，默认纯 P）。N>0 时用"
+                             "a=N*Vc*λ̇（λ̇ 取跟踪器框中心像素速率 / fx，Vc 取视觉接近率）"
+                             "折算滚转指令，可替代依赖飞控速度的 velalign ——"
+                             "但**启用即超出纯 P 契约**（引入视线角速率项）")
+    parser.add_argument("--speed-source", choices=("fc", "closing"), default="fc",
+                        help="超速治理/爬升限幅的速度来源：fc=飞控速度（默认）；"
+                             "closing=视觉接近率（无 GPS/光流真机的替代）")
     parser.add_argument("--kp-velalign", type=float, default=1.5,
                         help="速度矢量-视线夹角 → 滚转 的比例增益 (deg/deg)")
     # 实测：该项线性使用时能顶到 ±270°（1.5 deg/deg x 180°），把 roll 打满 ±30°
@@ -815,8 +825,15 @@ def main() -> int:
                        own["rpy"][2])
 
             if locked:
+                # 框中心像素速率（px/s）：由跟踪器在**真有检测**的那几帧更新，
+                # 供 --pn-gain>0 的比例导引横向项使用；外推帧沿用它最后一次的值。
+                u_rate = None
+                if detector is not None:
+                    bvec = detector.bbox_velocity()
+                    if bvec is not None:
+                        u_rate = float(bvec[0])
                 cmd = guidance.update(bbox, own_cmd["pos"], own_cmd["vel"], own_rpy, now, period,
-                                      fresh=fresh_meas)
+                                      fresh=fresh_meas, u_rate_px_s=u_rate)
                 if args.vertical == "althold" and now - last_alt_cmd > 0.05:
                     if cmd.valid:
                         target_z = float(cmd.z_target_est_m)

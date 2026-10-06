@@ -306,3 +306,58 @@ def test_rc_rate_limit():
     ch = p_cmd_to_rc(cmd, angle_limit_deg=g.angle_limit_deg, prev=prev, rate_limit=60)
     for axis in (0, 1, 3, 2):
         assert abs(ch[axis] - 1500) <= 60
+
+
+# --------------------------------------------------------------------- #
+# 可选的比例导引横向项（pn_gain>0）与视觉速度代理（speed_source）
+# --------------------------------------------------------------------- #
+def test_pn_term_disabled_by_default():
+    """默认 pn_gain=0：喂不喂像素速率，输出必须完全一致。"""
+    bb = bbox_around(340.0, 300.0, 40.0)
+    own_rpy = (0.0, -30.0, 0.0)
+    a = make_guidance()
+    b = make_guidance()
+    ca = a.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 120.0)
+    cb = b.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, 0.0)
+    assert ca.roll_cmd_deg == pytest.approx(cb.roll_cmd_deg, abs=1e-12)
+
+
+def test_pn_term_sign_and_magnitude():
+    """pn_gain=N：滚转增量 = atan(N*Vc*lambda_dot/g)，lambda_dot = u_dot/fx。"""
+    bb = bbox_around(320.0, 300.0, 40.0)          # u 恰在 cx -> e_u = 0，基线干净
+    own_rpy = (0.0, -30.0, 0.0)
+
+    def run(rate):
+        g = make_guidance(pn_gain=4.0)
+        g._closing_mps = 10.0                     # 白盒：固定接近速度便于验算
+        return g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05, True, rate)
+
+    fx = make_guidance().intrinsics.fx
+    cmd0, cmd1, cmd2 = run(0.0), run(46.78), run(-46.78)
+    expect = math.degrees(math.atan(4.0 * 10.0 * (46.78 / fx) / 9.80665))
+    assert cmd1.roll_cmd_deg - cmd0.roll_cmd_deg == pytest.approx(expect, abs=1e-9)
+    assert cmd2.roll_cmd_deg - cmd0.roll_cmd_deg == pytest.approx(-expect, abs=1e-9)
+    assert cmd0.roll_cmd_deg == pytest.approx(0.0, abs=1e-9)
+
+
+def test_speed_source_closing_replaces_fc_velocity():
+    """speed_source="closing"：飞控速度为 0 时，仍用视觉接近率触发超速治理。"""
+    bb = bbox_around(340.0, 400.0, 40.0)
+    own_rpy = (0.0, -30.0, 0.0)
+    kw = dict(kp_speed=4.0, v_max_mps=5.0, max_pitch_down_deg=25.0,
+              speed_source="closing")
+
+    def run(closing):
+        g = make_guidance(**kw)
+        g._closing_mps = closing
+        return g.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05)
+
+    fast, slow = run(16.0), run(1.0)
+    assert fast.pitch_cmd_deg != slow.pitch_cmd_deg
+    assert fast.pitch_cmd_deg > slow.pitch_cmd_deg     # 超速 -> 抬高低头下限
+
+    fc = make_guidance(kp_speed=4.0, v_max_mps=5.0, max_pitch_down_deg=25.0)
+    fc._closing_mps = 16.0
+    ref = fc.update(bb, OWN_POS, np.zeros(3), own_rpy, 0.0, 0.05)
+    assert ref.pitch_cmd_deg == pytest.approx(slow.pitch_cmd_deg, abs=1e-12)
+
