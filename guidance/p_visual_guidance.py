@@ -168,6 +168,7 @@ class PVisualGuidance:
         range_lpf_tau_s: float = 0.25,
         range_lpf_min_range_m: float = 12.0,
         closing_max_mps: float = 25.0,
+        closing_fit_n: int = 8,
         vmax_close_range_m: float = 12.0,
         vmax_close_floor_mps: float = 3.0,
         pop_up_pitch_deg: float = 0.0,
@@ -313,6 +314,10 @@ class PVisualGuidance:
         self.tau_max_s = float(tau_max_s)
         self._r_prev: Optional[float] = None
         self._closing_mps = 1.0
+        self._range_hist: list = []      # 短窗测距历史（量测调理，估接近率用）
+        self.closing_fit_n = int(closing_fit_n)
+        self._yaw_prev: Optional[float] = None       # 上帧航向（估机体偏航速率）
+        self._yaw_rate_dps: Optional[float] = None
         self._r_filt: Optional[float] = None
         self._el_fresh: Optional[float] = None   # 最后一次"新鲜"检测的视线仰角
         self._az_fresh: Optional[float] = None   # 最后一次"新鲜"检测的视线方位
@@ -431,11 +436,22 @@ class PVisualGuidance:
         else:
             self._r_filt = None          # 出滤波区即复位，回到终端时不留旧值
             range_for_tau = range_est
-        if self._r_prev is not None and dt > 0.0:
-            raw_closing = float(np.clip((self._r_prev - range_for_tau) / float(dt),
-                                        0.5, self.closing_max_mps))
-            ac = float(dt) / (0.20 + float(dt))
-            self._closing_mps += ac * (raw_closing - self._closing_mps)
+        # 接近速度：短窗端点差（默认 8 帧 ≈ 0.4 s）代替单帧差分。
+        # 旧做法把单帧差分**单边**钳到 [0.5, 25]：距离估计有 ±20% 噪声时，
+        # "看起来在远离"的那些帧被钳成 +0.5，EMA 结果系统性偏低 —— 实测终端
+        # 真值 5~8 m/s 而估计只有 3.2 m/s，超速治理因此不动作，无人机以 8.6 m/s
+        # 冲过目标后只能绕大圈回来。这里改成有符号的窗口斜率，无偏。
+        if np.isfinite(range_est):
+            self._range_hist.append((float(timestamp), float(range_est)))
+        if len(self._range_hist) > self.closing_fit_n:
+            del self._range_hist[0: len(self._range_hist) - self.closing_fit_n]
+        if len(self._range_hist) >= 2:
+            t_h0, r_h0 = self._range_hist[0]
+            t_h1, r_h1 = self._range_hist[-1]
+            if t_h1 - t_h0 > 1e-3:
+                self._closing_mps = float(np.clip(
+                    -(r_h1 - r_h0) / (t_h1 - t_h0),
+                    -self.closing_max_mps, self.closing_max_mps))
         self._r_prev = range_for_tau
         tau_s = float(np.clip(range_for_tau / max(0.5, self._closing_mps),
                                self.tau_min_s, self.tau_max_s))
@@ -444,6 +460,20 @@ class PVisualGuidance:
         # ---- 视线角速率 λ̇（量测调理，供比例导引项与视觉速度代理用）----
         # λ̇ ≈ u_dot / fx；u_dot 取自跟踪器的框中心像素速率。它逐帧抖动极大
         # （实测 |u_dot| 中位 80、p90 274、峰 766 px/s），必须先低通再进任何控制量。
+        # 机体偏航速率（量测调理）：机体绕 z 转动会让目标在**图像里**横扫，
+        # 但那不是视线转动 —— 必须补偿掉，否则回头/绕圈时 r·λ̇ 假报到上百 m/s，
+        # 把速度代理与比例导引项一起带飞（实测丢锁后无人机被"限速"到 0.3 m/s 干等）。
+        yaw_rate_dps = 0.0
+        if self._yaw_prev is not None and dt > 0.0:
+            dyaw = (float(yaw_own) - self._yaw_prev + 180.0) % 360.0 - 180.0
+            raw_yaw_rate = dyaw / float(dt)
+            self._yaw_rate_dps = (raw_yaw_rate if self._yaw_rate_dps is None
+                                  else self._yaw_rate_dps
+                                  + 0.5 * (raw_yaw_rate - self._yaw_rate_dps))
+        self._yaw_prev = float(yaw_own)
+        if self._yaw_rate_dps is not None:
+            yaw_rate_dps = float(self._yaw_rate_dps)
+
         lam_raw_dps = 0.0
         if u_rate_px_s is not None:
             lam_raw_dps = float(np.rad2deg(float(u_rate_px_s) /
@@ -455,6 +485,8 @@ class PVisualGuidance:
             lam_dps = float(self._lam_dps)
         else:
             lam_dps = lam_raw_dps
+        # 视线角速率（惯性系）= 机体系速率 + 机体偏航速率（见上）
+        lam_dps = lam_dps + yaw_rate_dps
         u_rate_px_s_raw = float(u_rate_px_s) if u_rate_px_s is not None else 0.0
 
         # -------------------------------------------------------------- #
