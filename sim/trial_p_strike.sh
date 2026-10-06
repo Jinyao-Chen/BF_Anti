@@ -5,9 +5,18 @@ set -u
 cd "$(dirname "$0")/.."
 NAME="$1"; shift
 LOG="/tmp/trial_${NAME}.csv"
-# 检测后端可切换（A/B 用）：默认仍是 H100 隧道 127.0.0.1:9300
+# 检测后端（与 run_p_strike_live.sh 同一套开关）：
+#   YOLO_BACKEND=pt    我们的 YOLOv8-L  anti_uav_best.pt      -> :9300, --target-width 2.0
+#   YOLO_BACKEND=onnx  第三方的 YOLOv8n  v1_yolov8_mAP50.onnx   -> :9301, --target-width 2.38
+# 显式给 YOLO_PORT / TARGET_WIDTH 时以显式值为准。
 YOLO_HOST="${YOLO_HOST_OVERRIDE:-127.0.0.1}"
-YOLO_PORT="${YOLO_PORT:-9300}"
+YOLO_BACKEND="${YOLO_BACKEND:-pt}"
+case "${YOLO_BACKEND}" in
+    onnx) YOLO_PORT_DEFAULT=9301; TARGET_WIDTH_DEFAULT=2.38 ;;
+    *)    YOLO_PORT_DEFAULT=9300; TARGET_WIDTH_DEFAULT=2.0 ;;
+esac
+YOLO_PORT="${YOLO_PORT:-$YOLO_PORT_DEFAULT}"
+TARGET_WIDTH="${TARGET_WIDTH:-$TARGET_WIDTH_DEFAULT}"
 # 防呆：YOLO 后端不通时，真检测永远不返回 -> 全程 SEARCH -> "脱靶"数字毫无意义
 # （已实测踩坑：隧道静默断开导致 5 发数据作废）
 if ! python3 -c "import socket;socket.create_connection(('${YOLO_HOST}',${YOLO_PORT}),timeout=4)" 2>/dev/null; then
@@ -24,7 +33,7 @@ if [ -n "${DUMP_DIR:-}" ]; then
     mkdir -p "${DUMP_DIR}/${NAME}"
     DUMP_ARGS=(--dump-dir "${DUMP_DIR}/${NAME}" --dump-hz "${DUMP_HZ:-10}")
 fi
-echo "[${NAME}] 检测后端 ${YOLO_HOST}:${YOLO_PORT} 可用；重启仿真 ..."
+echo "[${NAME}] 检测后端 ${YOLO_BACKEND} @ ${YOLO_HOST}:${YOLO_PORT} 可用（target-width=${TARGET_WIDTH}）；重启仿真 ..."
 pkill -9 -f "gz sim" 2>/dev/null; pkill -9 -f betaflight_SITL 2>/dev/null; sleep 3
 BF_ROOT="$HOME/betaflight" BF_ANTI_WORLD="$PWD/sim/worlds/bf_anti_p_strike_light_cam.sdf" \
     ./sim/launch_sitl.sh --headless > "/tmp/trial_${NAME}_sim.log" 2>&1 &
@@ -50,7 +59,7 @@ echo "[${NAME}] 开始打击（最长 90 s，逐秒进度写 /tmp/trial_${NAME}.
 timeout 90 python3 sim/run_p_vision_strike.py --yolo-host "${YOLO_HOST}" --yolo-port "${YOLO_PORT}" \
     --min-conf 0.10 --inner-model "" --cam-link cam_link --view camera \
     --hover-pwm 1430 --tilt 20 --climb-alt 5 --stage-pitch 8 --duration 30 \
-    --target-width 2.0 --hit-radius 0.8 \
+    --target-width "${TARGET_WIDTH}" --hit-radius 0.8 \
     --max-pitch-down 25 --angle-limit 40 --kp-pitch 13 --kp-yaw 220 --max-yaw-rate 300 \
     --kp-roll 45 --kp-z 1.0 --max-roll 30 --kp-speed 4 --v-max 5 --kp-velalign 1.5 \
     --vz-time-to-go 1 --ki-z 0.05 \
