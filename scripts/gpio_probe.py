@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """需要 sudo 运行: 查看 GPIO 映射并找出可用的 CS 引脚"""
-import os, time, sys
+import os,  time
 
 print("=" * 55)
 print("GPIO 排针映射探测")
@@ -24,7 +24,7 @@ for gpio in range(411, 450):
             f.write(str(gpio))
         time.sleep(0.05)
         exported.append(gpio)
-    except Exception as e:
+    except Exception:
         pass
 
 print(f"成功导出 {len(exported)} 个新 GPIO:")
@@ -33,7 +33,7 @@ for g in exported:
     try:
         label = open(f"{path}/label").read().strip()
         print(f"  GPIO {g} ({label})")
-    except:
+    except Exception:
         print(f"  GPIO {g}")
 
 # 3. 列出所有已导出的 GPIO
@@ -46,7 +46,7 @@ for entry in sorted(os.listdir("/sys/class/gpio")):
             value = open(f"{path}/value").read().strip()
             label = open(f"{path}/label").read().strip()
             print(f"  {entry}: dir={direction} val={value} label={label}")
-        except:
+        except Exception:
             pass
 
-print(f"\n下一步: 逐个翻转这些 GPIO，用万用表找到 Pin 26 对应的编号")
+print("\n下一步: 逐个翻转这些 GPIO，用万用表找到 Pin 26 对应的编号")

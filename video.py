@@ -4,7 +4,7 @@ PAL 视频帧生成 → SPI 发给 Pico 协处理器
 RDK X5 SPI Master → Pico SPI Slave → PIO+DMA → GPIO → 视频
 """
 
-import spidev, numpy as np, threading, time, sys
+import spidev,  numpy as np,  threading,  time
 
 # ─── PAL 8 MHz 编码 (每 byte = 1µs) ────────────────────────────────────
 SPI_HZ        = 16_000_000    # SPI 传给 Pico 的速度

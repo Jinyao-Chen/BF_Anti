@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="x500_target">
+    <pose>0 0 0 0 0 0</pose>
+    <static>false</static>
+    <self_collide>false</self_collide>
+    <link name="base_link">
+      <inertial>
+        <mass>2.0</mass>
+        <inertia>
+          <ixx>0.02166666666666667</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.02166666666666667</iyy>
+          <iyz>0</iyz>
+          <izz>0.04000000000000001</izz>
+        </inertia>
+      </inertial>
+      <gravity>true</gravity>
+      <velocity_decay/>
+      <visual name="body_visual">
+        <pose>0 0 0.025 0 0 3.141592654</pose>
+        <geometry>
+          <mesh>
+            <scale>3 3 3</scale>
+            <uri>model://x500_base/meshes/NXP-HGD-CF.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <visual name="motor_base_0">
+        <pose>0.174 0.174 0.032 0 0 -0.45</pose>
+        <geometry><mesh><uri>model://x500_base/meshes/5010Base.dae</uri></mesh></geometry>
+      </visual>
+      <visual name="motor_base_1">
+        <pose>-0.174 0.174 0.032 0 0 -0.45</pose>
+        <geometry><mesh><uri>model://x500_base/meshes/5010Base.dae</uri></mesh></geometry>
+      </visual>
+      <visual name="motor_base_2">
+        <pose>0.174 -0.174 0.032 0 0 -0.45</pose>
+        <geometry><mesh><uri>model://x500_base/meshes/5010Base.dae</uri></mesh></geometry>
+      </visual>
+      <visual name="motor_base_3">
+        <pose>-0.174 -0.174 0.032 0 0 -0.45</pose>
+        <geometry><mesh><uri>model://x500_base/meshes/5010Base.dae</uri></mesh></geometry>
+      </visual>
+      <visual name="prop_0">
+        <pose>0.174 0.174 0.06 0 0 0</pose>
+        <geometry><mesh><uri>model://x500_base/meshes/1345_prop_ccw.stl</uri></mesh></geometry>
+      </visual>
+      <visual name="prop_1">
+        <pose>-0.174 0.174 0.06 0 0 0</pose>
+        <geometry><mesh><uri>model://x500_base/meshes/1345_prop_cw.stl</uri></mesh></geometry>
+      </visual>
+      <visual name="prop_2">
+        <pose>0.174 -0.174 0.06 0 0 0</pose>
+        <geometry><mesh><uri>model://x500_base/meshes/1345_prop_cw.stl</uri></mesh></geometry>
+      </visual>
+      <visual name="prop_3">
+        <pose>-0.174 -0.174 0.06 0 0 0</pose>
+        <geometry><mesh><uri>model://x500_base/meshes/1345_prop_ccw.stl</uri></mesh></geometry>
+      </visual>
+      <!-- Simple collision proxy: keeps the visual drone simple and avoids
+           ODE issues with the original multi-link rotor collision meshes. -->
+      <collision name="collision">
+        <pose>0 0 0.03 0 0 0</pose>
+        <geometry><box><size>0.55 0.55 0.12</size></box></geometry>
+        <surface>
+          <contact>
+            <collide_bitmask>0x00</collide_bitmask>
+          </contact>
+        </surface>
+      </collision>
+    </link>
+  </model>
+</sdf>

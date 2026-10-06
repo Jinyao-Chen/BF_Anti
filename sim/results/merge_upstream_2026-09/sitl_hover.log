@@ -1,0 +1,233 @@
+[bf-anti-sim] building Betaflight SITL_GAZEBO (incremental)...
+make: 进入目录“/tmp/bf_merge”
+make[2]: “obj/betaflight_2026.12.0-alpha_SITL_SITL_GAZEBO”已是最新。
+make: 离开目录“/tmp/bf_merge”
+[bf-anti-sim] writing SITL EEPROM from /tmp/bf_merge/src/platform/SIMULATOR/gazebo/config/sitl_gazebo_config.txt...
+bind port 5761 for UART1
+[SITL] Config file: /tmp/bf_merge/src/platform/SIMULATOR/gazebo/config/sitl_gazebo_config.txt (will load, save to EEPROM, and exit)
+[SITL] The SITL will output to IP 127.0.0.1:9002 (Gazebo) and 127.0.0.1:9001 (RealFlightBridge)
+[system]Init...
+[SITL] init PwmOut UDP link to gazebo 127.0.0.1:9002...0
+[SITL] init PwmOut UDP link to RF9 127.0.0.1:9001...0
+[SITL] start UDP server @9003...0
+[SITL] start UDP server for RC input @9004...0
+[FLASH_Unlock] loaded 'eeprom.bin', size = 32768 / 32768
+[timer]Init...
+Initialized motor count 4
+debugInit
+unusedPinsInit
+[CONFIG] Processing config file: /tmp/bf_merge/src/platform/SIMULATOR/gazebo/config/sitl_gazebo_config.txt
+# Betaflight SITL Gazebo auto-tuned configuration (generated)
+
+# feature RX_UDP
+AlreadyEnabled RX_UDP
+
+# aux 0 0 0 1700 2100
+aux 0 0 0 1700 2100 0 0
+
+# aux 1 3 1 1700 2100
+aux 1 3 1 1700 2100 0 0
+
+# aux 2 11 2 1700 2100
+aux 2 11 2 1700 2100 0 0
+
+# set ap_hover_throttle = 1530
+ap_hover_throttle set to 1530
+# set ap_altitude_p = 40
+ap_altitude_p set to 40
+# set ap_altitude_i = 50
+ap_altitude_i set to 50
+# set ap_altitude_d = 50
+ap_altitude_d set to 50
+# set ap_altitude_f = 30
+ap_altitude_f set to 30
+# set ap_position_p = 2
+ap_position_p set to 2
+# set ap_position_i = 0
+ap_position_i set to 0
+# set ap_position_d = 80
+ap_position_d set to 80
+# set ap_position_a = 0
+ap_position_a set to 0
+# set ap_position_f = 2
+ap_position_f set to 2
+# set ap_position_cutoff = 20
+ap_position_cutoff set to 20
+# set ap_stop_threshold = 10
+ap_stop_threshold set to 10
+# set ap_throttle_max = 2000
+ap_throttle_max set to 2000
+# set ap_max_angle = 15
+ap_max_angle set to 15
+# set ap_velocity_drag_coeff = 30
+ap_velocity_drag_coeff set to 30
+# set ap_max_velocity = 5000
+ap_max_velocity set to 5000
+# set ap_offboard_vel_p = 80
+ap_offboard_vel_p set to 80
+# set ap_offboard_vel_d = 0
+ap_offboard_vel_d set to 0
+# set ap_offboard_accel_ff = 100
+ap_offboard_accel_ff set to 100
+# set ap_offboard_drag = 20
+ap_offboard_drag set to 20
+# set ap_offboard_pos_gain = 300
+ap_offboard_pos_gain set to 300
+# set ap_offboard_brake_gain = 0
+ap_offboard_brake_gain set to 0
+# set ap_offboard_rate_p = 2000
+ap_offboard_rate_p set to 2000
+# set ap_yaw_mode = VELOCITY
+ap_yaw_mode set to VELOCITY
+# set ap_yaw_p = 500
+###ERROR IN set: INVALID VALUE###
+Allowed range: 0 - 200
+
+# set ap_yaw_d = 100
+###ERROR IN set: INVALID NAME: ap_yaw_d = 100###
+
+# set ap_max_yaw_rate = 300
+###ERROR IN set: INVALID VALUE###
+Allowed range: 10 - 250
+
+# set ap_min_forward_velocity = 100
+ap_min_forward_velocity set to 100
+# set yaw_motors_reversed = OFF
+yaw_motors_reversed set to OFF
+# set angle_p_gain = 200
+angle_p_gain set to 200
+# set p_roll = 100
+p_roll set to 100
+# set i_roll = 80
+i_roll set to 80
+# set d_roll = 50
+d_roll set to 50
+# set p_pitch = 100
+p_pitch set to 100
+# set i_pitch = 84
+i_pitch set to 84
+# set d_pitch = 50
+d_pitch set to 50
+# set pwr_on_arm_grace = 0
+pwr_on_arm_grace set to 0
+# set runaway_takeoff_prevention = OFF
+runaway_takeoff_prevention set to OFF
+# [CONFIG] Config file processed, EEPROM saved
+[bf-anti-sim] starting Betaflight SITL...
+bind port 5761 for UART1
+[bf-anti-sim] SITL is up (MSP 127.0.0.1:5761).
+[bf-anti-sim] starting Gazebo (headless)...
+New connection on UART1, 0
+[NEW]UART1: 1,1
+[CLS]UART1: 1,0
+[1;32m[Msg] [0m[1;32mGazebo Sim Server v[0m[1;32m8.9.0[0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mLoading SDF world file[[0m[1;32m~/BF_Anti/sim/worlds/bf_anti_intercept_real.sdf[0m[1;32m].[0m
+[1;33mWarning [Utils.cc:132][0m [/sdf/model[@name="iris_with_standoffs"]/link[@name="base_link"]/sensor[@name="camera_sensor"]/camera/lens/custom_function/cutoff_angle:/tmp/bf_merge/src/platform/SIMULATOR/gazebo/models/iris_with_standoffs/model.sdf:L137]: XML Element[cutoff_angle], child of element[custom_function], not defined in SDF. Copying[cutoff_angle] as children of [custom_function].
+[1;33mWarning [Utils.cc:132][0m [/sdf/model[@name="iris_with_standoffs"]/link[@name="base_link"]/sensor[@name="camera_sensor"]/camera/lens/custom_function/env_map:/tmp/bf_merge/src/platform/SIMULATOR/gazebo/models/iris_with_standoffs/model.sdf:L138]: XML Element[env_map], child of element[custom_function], not defined in SDF. Copying[env_map] as children of [custom_function].
+[1;32m[Msg] [0m[1;32mServing entity system service on [[0m[1;32m/[0m[1;32mentity/system/add[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mCreate service on [[0m[1;32m/world/betaflight_world/create[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mRemove service on [[0m[1;32m/world/betaflight_world/remove[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mPose service on [[0m[1;32m/world/betaflight_world/set_pose[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mPose service on [[0m[1;32m/world/betaflight_world/set_pose_vector[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mLight configuration service on [[0m[1;32m/world/betaflight_world/light_config[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mPhysics service on [[0m[1;32m/world/betaflight_world/set_physics[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mSphericalCoordinates service on [[0m[1;32m/world/betaflight_world/set_spherical_coordinates[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mEnable collision service on [[0m[1;32m/world/betaflight_world/enable_collision[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mDisable collision service on [[0m[1;32m/world/betaflight_world/disable_collision[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mMaterial service on [[0m[1;32m/world/betaflight_world/visual_config[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mMaterial service on [[0m[1;32m/world/betaflight_world/wheel_slip[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mApplyJointForce subscribing to Double messages on [[0m[1;32m/model/iris_with_Betaflight/joint/iris_with_standoffs::rotor_0_joint/cmd_force[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mApplyJointForce subscribing to Double messages on [[0m[1;32m/model/iris_with_Betaflight/joint/iris_with_standoffs::rotor_1_joint/cmd_force[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mApplyJointForce subscribing to Double messages on [[0m[1;32m/model/iris_with_Betaflight/joint/iris_with_standoffs::rotor_2_joint/cmd_force[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mApplyJointForce subscribing to Double messages on [[0m[1;32m/model/iris_with_Betaflight/joint/iris_with_standoffs::rotor_3_joint/cmd_force[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mLinear velocity initialized to [[0m[1;32m0[0m[1;32m [0m[1;32m0[0m[1;32m [0m[1;32m0[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mAngular velocity initialized to [[0m[1;32m0[0m[1;32m [0m[1;32m0[0m[1;32m [0m[1;32m0[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mVelocityControl subscribing to twist messages on [[0m[1;32m/model/target_drone/cmd_vel[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mLoaded level [[0m[1;32mdefault[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mServing world controls on [[0m[1;32m/world/betaflight_world[0m[1;32m/control], [[0m[1;32m/world/betaflight_world[0m[1;32m/control/state] and [[0m[1;32m/world/betaflight_world[0m[1;32m/playback/control][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mServing GUI information on [[0m[1;32m/world/betaflight_world[0m[1;32m/[0m[1;32mgui/info[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mWorld [[0m[1;32mbetaflight_world[0m[1;32m] initialized with [[0m[1;32mdefault_physics[0m[1;32m] physics profile.[0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mServing world SDF generation service on [[0m[1;32m/world/betaflight_world[0m[1;32m/[0m[1;32mgenerate_world_sdf[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mServing world names on [[0m[1;32m/gazebo/worlds[0m[1;32m][0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mResource path add service on [[0m[1;32m/gazebo/resource_paths/add[0m[1;32m].[0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mResource path get service on [[0m[1;32m/gazebo/resource_paths/get[0m[1;32m].[0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mResource path resolve service on [[0m[1;32m/gazebo/resource_paths/resolve[0m[1;32m].[0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mResource paths published on [[0m[1;32m/gazebo/resource_paths[0m[1;32m].[0m[1;32m[0m
+[1;32m[Msg] [0m[1;32mS[1;33m[Wrn] [Ogre2Camera.cc:421] [0m[1;33mOgre2Camera::SetVisibilityMask: Mask bits [0m[1;33mc0000000[0m[1;33m are set but will be ignored as they conflict with the [0m[1;33mreserved bits used internally by the ogre2 backend.[0m[1;33m[0m
+[bf-anti-sim] target_drone (real x500) at (30, 0, 10) in Gazebo world coordinates.
+New connection on UART1, 0
+[NEW]UART1: 1,1
+[SITL] The SITL will output to IP 127.0.0.1:9002 (Gazebo) and 127.0.0.1:9001 (RealFlightBridge)
+[system]Init...
+[SITL] init PwmOut UDP link to gazebo 127.0.0.1:9002...0
+[SITL] init PwmOut UDP link to RF9 127.0.0.1:9001...0
+[SITL] start UDP server @9003...0
+[SITL] start UDP server for RC input @9004...0
+[FLASH_Unlock] loaded 'eeprom.bin', size = 32768 / 32768
+[timer]Init...
+Initialized motor count 4
+debugInit
+unusedPinsInit
+[SITL] new fdm 144 t:0.002000 from 0.0.0.0:0
+[SITL] t=2831ms Arming disabled: RXLOSS ANGLE
+[SITL] t=2831ms  spd=0.00m/s  pos=(0,0)  alt=0.00m  att=(0.0,0.0,0.0)
+[SITL] t=2832ms Arming disabled: RXLOSS ANGLE
+[SITL] t=2832ms  spd=0.00m/s  pos=(0,0)  alt=0.00m  att=(0.0,0.0,0.0)
+[SITL] t=3745ms Arming disabled: RXLOSS
+[SITL] t=3745ms  spd=0.00m/s  pos=(0,0)  alt=-0.02m  att=(0.0,0.0,0.9)
+[SITL] t=4622ms Arming disabled: RXLOSS
+[SITL] t=4622ms  spd=0.00m/s  pos=(0,0)  alt=0.03m  att=(0.0,0.0,3.5)
+[SITL] t=5458ms Arming disabled: RXLOSS
+[SITL] t=5458ms  spd=0.00m/s  pos=(0,0)  alt=0.05m  att=(0.0,0.0,4.5)
+[SITL] t=6298ms Arming disabled: RXLOSS
+[SITL] t=6298ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,7.1)
+[SITL] t=7118ms Arming disabled: RXLOSS
+[SITL] t=7118ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,8.6)
+[SITL] t=7982ms Arming disabled: RXLOSS
+[SITL] t=7982ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,10.9)
+[SITL] t=8812ms Arming disabled: RXLOSS
+[SITL] t=8812ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,12.1)
+[SITL] t=9613ms Arming disabled: RXLOSS
+[SITL] t=9613ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,13.6)
+[SITL] t=10438ms Arming disabled: RXLOSS
+[SITL] t=10438ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,15.3)
+[SITL] t=11263ms Arming disabled: RXLOSS
+[SITL] t=11263ms  spd=0.00m/s  pos=(0,0)  alt=0.07m  att=(0.0,0.0,17.9)
+[SITL] t=12100ms Arming disabled: RXLOSS
+[SITL] t=12100ms  spd=0.00m/s  pos=(0,0)  alt=0.07m  att=(0.0,0.0,19.9)
+[SITL] t=12931ms Arming disabled: RXLOSS
+[SITL] t=12931ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,20.8)
+[SITL] t=13764ms Arming disabled: RXLOSS
+[SITL] t=13764ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,22.4)
+[SITL] t=14597ms Arming disabled: RXLOSS
+[SITL] t=14597ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,23.3)
+[SITL] t=15374ms Arming disabled: RXLOSS
+[SITL] t=15374ms  spd=0.00m/s  pos=(0,0)  alt=0.07m  att=(0.0,0.0,24.8)
+[SITL] t=16198ms Arming disabled: RXLOSS
+[SITL] t=16198ms  spd=0.00m/s  pos=(0,0)  alt=0.07m  att=(0.0,0.0,25.4)
+[SITL] t=17001ms Arming disabled: RXLOSS
+[SITL] t=17001ms  spd=0.00m/s  pos=(0,0)  alt=0.07m  att=(0.0,0.0,26.8)
+[SITL] t=17851ms Arming disabled: RXLOSS
+[SITL] t=17851ms  spd=0.00m/s  pos=(0,0)  alt=0.07m  att=(0.0,0.0,27.4)
+[SITL] t=18660ms Arming disabled: RXLOSS
+[SITL] t=18660ms  spd=0.00m/s  pos=(0,0)  alt=0.07m  att=(0.0,0.0,27.4)
+[SITL] t=19469ms Arming disabled: RXLOSS
+[SITL] t=19469ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,27.6)
+[SITL] new rc 40: t:1790350032.713895 AETR: 1500 1500 1000 1500 AUX1-4: 1000 1500 1500 1500
+[SITL] t=20324ms Arming disabled: RXLOSS
+[SITL] t=20324ms  spd=0.00m/s  pos=(0,0)  alt=0.06m  att=(0.0,0.0,28.3)
+[SITL] t=21164ms  spd=0.00m/s  pos=(0,0)  alt=-0.00m  att=(0.0,0.0,28.8)
+[SITL] t=21988ms  spd=0.00m/s  pos=(0,0)  alt=-0.00m  att=(-0.2,0.1,28.3)
+[SITL] t=22862ms  spd=0.32m/s  pos=(-9,2)  alt=0.68m  att=(0.0,0.0,142.7)
+[SITL] t=23724ms  spd=0.68m/s  pos=(-48,5)  alt=1.67m  att=(0.0,0.0,157.5)
+[SITL] t=24545ms  spd=0.96m/s  pos=(-108,11)  alt=2.44m  att=(0.0,-0.1,113.8)
+[SITL] t=25400ms  spd=1.16m/s  pos=(-189,19)  alt=3.10m  att=(0.0,0.0,144.9)
+[SITL] t=26298ms  spd=1.25m/s  pos=(-283,27)  alt=3.69m  att=(-0.1,0.1,308.7)
+[SITL] t=27171ms  spd=1.25m/s  pos=(-380,32)  alt=4.15m  att=(0.0,0.0,69.9)
+[SITL] t=28075ms  spd=1.13m/s  pos=(-475,31)  alt=4.49m  att=(0.2,0.0,114.4)
+[SITL] t=28984ms  spd=0.82m/s  pos=(-555,21)  alt=4.72m  att=(0.1,0.0,100.2)
+[SITL] t=29839ms  spd=0.47m/s  pos=(-600,4)  alt=4.82m  att=(-0.1,0.0,89.3)
+[SITL] t=30682ms  spd=0.45m/s  pos=(-609,-21)  alt=4.83m  att=(0.0,0.0,50.4)
+[SITL] t=31533ms  spd=0.88m/s  pos=[CLS]UART1: 1,0
+已终止
+[bf-anti-sim] stopping...

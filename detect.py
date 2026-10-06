@@ -435,8 +435,8 @@ def main():
             if opt.tracking_switch is not None:
                 print(f"  切入开关: CRSF CH{opt.tracking_switch} (须先见低位)")
         elif channel_source is not None:
-            print(f"  FC 架构: 接收机在飞控 (CRSF Serial RX), 通道读 MSP_GET_RC")
-            print(f"  BOXMSPOVERRIDE 由飞手 AUX3 物理开关控制")
+            print("  FC 架构: 接收机在飞控 (CRSF Serial RX), 通道读 MSP_GET_RC")
+            print("  BOXMSPOVERRIDE 由飞手 AUX3 物理开关控制")
             if opt.tracking_switch is not None:
                 print(f"  切入开关: CH{opt.tracking_switch} (MSP RC 缓存)")
         else:

@@ -60,7 +60,7 @@ def main():
 
     print(f"\n{'CRSF 通道监控':—^62}")
     print(f"端口: {args.port} @ {args.baud}")
-    print(f"对频后动动摇杆, Ctrl+C 退出\n")
+    print("对频后动动摇杆, Ctrl+C 退出\n")
 
     try:
         while True:
@@ -69,7 +69,6 @@ def main():
                 f_ok = parser.frames_ok
                 f_bad = parser.frames_bad
 
-            now = time.monotonic()
             if f_ok > last_ok:
                 last_ok = f_ok
                 status = "✅"

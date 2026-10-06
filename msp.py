@@ -374,7 +374,7 @@ def cmd_check():
             other = [n for n in names if n not in ("NO_GYRO", "RX_FAILSAFE")]
             print(f"  {elapsed:.1f}s  RX_FAILSAFE={'⛔' if rx else '✅'}  flags=0x{flags:02X}{' ' + ' '.join(other) if other else ''}")
             if not rx:
-                print(f"  ✅ FAILSAFE 已消除!")
+                print("  ✅ FAILSAFE 已消除!")
                 cleared = True
                 break
         time.sleep(0.1)
@@ -459,7 +459,6 @@ def cmd_arm():
 
 def cmd_throttle():
     """手动推油门 (需先 ARM)"""
-    import select
     m = MSP()
     m.set_rc(1500, 1500, 1000, 1500, 2000, 1500, 1500, 1500)
     m.stream_start()

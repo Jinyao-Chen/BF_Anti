@@ -1,0 +1,46 @@
+{
+  "structure": "firmware_pid",
+  "gains": {
+    "kp": 0.5767809529355847,
+    "ki": 0.08097402220774032,
+    "kd": 1.0,
+    "kf": 0.0
+  },
+  "betaflight": {
+    "ap_altitude_p": 115.3562,
+    "ap_altitude_i": 40.487,
+    "ap_altitude_d": 100.0,
+    "ap_altitude_f": 0.0
+  },
+  "validated_release_gains": {
+    "ap_altitude_p": 50.0,
+    "ap_altitude_i": 50.0,
+    "ap_altitude_d": 20.0,
+    "ap_altitude_f": 0.0
+  },
+  "plant": {
+    "mass": 1.5,
+    "gravity": 9.80665,
+    "hover_throttle_norm": 0.53,
+    "thrust_tau_s": 0.28,
+    "measurement_tau_s": 0.6,
+    "vz_measurement_tau_s": 0.05,
+    "thrust_min_n": 0.0,
+    "thrust_max_n": 27.948952499999997,
+    "max_accel_mps2": 3.0,
+    "disturbance_accel_mps2": 0.0,
+    "altitude_i_limit_pwm": 150.0,
+    "target_vz_cms": 0.0,
+    "pwm_range_min": 1000.0,
+    "pwm_range_max": 2000.0
+  },
+  "metrics": {
+    "cost": 24.461968376204013,
+    "overshoot_m": 0.8212812076529854,
+    "steady_state_error_m": 0.09583737944071524,
+    "settling_time_s": 2.18,
+    "max_thrust_n": 16.95932682896493,
+    "min_thrust_n": 13.770093854403086
+  },
+  "note": "betaflight 是理论整定值，validated_release_gains 是 release260904 已通过 SITL 回归的最终值；两者都使用固件真实缩放。"
+}

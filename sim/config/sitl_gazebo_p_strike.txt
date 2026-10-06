@@ -1,0 +1,96 @@
+# BF_Anti 纯 P 视觉制导 SITL 配置（由固件默认 config 派生）
+#
+# 与固件默认 config 的差异只有模式开关（默认 config 的 id 3/11 是 MAG/AUTOPILOT）：
+#   aux 1 1 1 1700 2100   AUX2 -> BOXANGLE   (id 1)
+#   aux 2 4 2 1700 2100   AUX3 -> BOXALTHOLD (id 4)
+# 其余保持：hover=1670（LiftDrag 世界实测悬停）、物理高度环增益、放宽的 failsafe。
+# 注意：ALT_HOLD 只在 --vertical althold 路径使用；throttle 路径只用 ANGLE。
+set angle_limit = 60
+
+# Betaflight SITL Gazebo auto-tuned configuration (generated)
+feature RX_UDP
+aux 0 0 0 1700 2100
+aux 1 1 1 1700 2100    # AUX2 -> ANGLE (id 1; release260904 枚举)
+aux 2 4 2 1700 2100    # AUX3 -> ALT_HOLD (id 4)
+# LiftDrag world (the default plant).  Re-identified with the spin case
+# (scripts/identify_plant.py): the true hover command here is ~1660 us, not the
+# 1530 this file used to carry.  With 1530 the altitude loop could not hold 2 m
+# at all - it saturated and settled at 0.9 m.  The force-only world keeps its own
+# 1644 in sitl_gazebo_config.force_only.txt.
+set ap_hover_throttle = 1670
+# Vertical loop gains are in physical acceleration units now:
+#   ap_altitude_p: (m/s^2) per metre of error,  x10000 -> 170 = 1.70 (omega_n ~1.3)
+#   ap_altitude_i: (m/s^2) per (metre * second), x10000 -> 5   = 0.05 (trim only)
+#   ap_altitude_d: (m/s^2) per (metre/second),  x100   -> 260 = 2.60 (zeta ~1.0)
+# Bandwidth: the loop was designed for a 0.42 s estimator/baro lag, but that
+# figure turned out to be a harness measurement artefact - with a correct SITL
+# clock and a throttled truth subscription the estimator tracks the truth to
+# 0.02-0.06 s.  At the old 0.6 rad/s the reference's own 2.8 m/s climb profile
+# could not be tracked and a 2 m climb overshot to 4.8 m; 1.3 rad/s with zeta 1.0
+# tracks it without losing stability.
+#   ap_altitude_f: feedforward, left at 0; the trajectory reference supplies
+#                  the vertical acceleration feedforward instead.
+# P must dominate the integral: the reference-free altitude-hold test showed a
+# strong integral limit-cycling between its bounds (see the validation doc).
+# The loop stays low bandwidth because the estimator/baro path lags the truth by
+# ~0.4 s and a faster loop oscillates against that lag.
+set ap_altitude_p = 170
+set ap_altitude_i = 5
+set ap_altitude_d = 260
+set ap_altitude_f = 0
+# Log the altitude loop internals (dbg0 = commanded throttle PWM, dbg4..7 =
+# P/I/D/F in m/s^2 x100).
+set debug_mode = AUTOPILOT_ALTITUDE
+# Keep the un-identified speed^2 lift-loss feedforward disabled.  High-speed
+# compensation is added only after the plant is identified; otherwise this
+# term requests 12.5 m/s^2 at 50 m/s and consumes the thrust margin.
+set ap_altitude_lift_ff = 0
+# Plant shape used to linearise the altitude loop: 200 = T ~ command^2, which
+# is the clean SITL motor model and the usual ESC/motor behaviour about hover.
+set ap_thrust_exponent = 200
+# SITL brings up a lock-step simulation on a shared machine.  Any host
+# scheduling stall makes the firmware's wall-based clock (sitl.c micros64():
+# wall delta x simRate) jump by the stall while the simulator itself takes no
+# steps at all; failsafe's stage-1 timer is 1.5 s of that clock and its
+# recovery delay 1 s, so an occasional multi-second stall would put the vehicle
+# into failsafe and latch THROTTLE/ARM_SWITCH, ending the run.  Measured: RC
+# delivery itself is clean (250 frames/s, max inter-arrival gap 4.7 ms), so this
+# is host jitter, not link loss.  Widen the timer for the simulator and keep the
+# offboard lease (300 ms-1 s) as the fast protection under test.
+set failsafe_delay = 60
+set failsafe_recovery_delay = 10
+
+set ap_position_p = 2
+set ap_position_i = 0
+set ap_position_d = 80
+set ap_position_a = 0
+set ap_position_f = 2
+set ap_position_cutoff = 20
+set ap_stop_threshold = 10
+set ap_throttle_min = 1100
+set ap_throttle_max = 2000
+set ap_max_angle = 30
+set ap_velocity_drag_coeff = 30
+set ap_max_velocity = 5000
+set ap_offboard_vel_p = 120
+set ap_offboard_vel_d = 250
+set ap_offboard_accel_ff = 100
+set ap_offboard_drag = 20
+set ap_offboard_pos_gain = 80
+set ap_offboard_brake_gain = 50
+set ap_offboard_rate_p = 2000
+set ap_yaw_mode = VELOCITY
+set ap_yaw_p = 500
+set ap_yaw_d = 100
+set ap_max_yaw_rate = 300
+set ap_min_forward_velocity = 100
+set yaw_motors_reversed = OFF
+set angle_p_gain = 50
+set p_roll = 100
+set i_roll = 80
+set d_roll = 50
+set p_pitch = 100
+set i_pitch = 84
+set d_pitch = 50
+set pwr_on_arm_grace = 0
+set runaway_takeoff_prevention = OFF

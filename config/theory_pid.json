@@ -1,0 +1,119 @@
+{
+  "rate": {
+    "kp": 1.7091,
+    "ki": 42.7275,
+    "kd": 0.0
+  },
+  "attitude": {
+    "kp": 64.0,
+    "ki": 0.0,
+    "kd": 14.4
+  },
+  "velocity": {
+    "kp": 5.4,
+    "ki": 9.0,
+    "kd": 0.0
+  },
+  "position": {
+    "kp": 1.0,
+    "ki": 0.0,
+    "kd": 0.0
+  },
+  "altitude": {
+    "kp": 0.39999999999999997,
+    "ki": 1.44,
+    "kd": 2.16
+  },
+  "bandwidths": {
+    "rate_rad_s": 45.0,
+    "attitude_rad_s": 8.0,
+    "velocity_rad_s": 3.0,
+    "position_rad_s": 1.0,
+    "altitude_rad_s": 1.2
+  },
+  "damping": 0.9,
+  "metrics": {
+    "rate": {
+      "stable": 1.0,
+      "overshoot_pct": 15.513413737189023,
+      "rise_time_s": 0.0150093808630394,
+      "settling_time_s": 0.1200750469043152,
+      "itae": 0.0006140961418177222,
+      "steady_state": 0.9999999999999998,
+      "gain_margin_db": 0.0,
+      "phase_margin_deg": 0.0,
+      "gain_crossover_rad_s": 0.0,
+      "margins_valid": 0.0
+    },
+    "attitude": {
+      "stable": 1.0,
+      "overshoot_pct": 0.0,
+      "rise_time_s": 0.0,
+      "settling_time_s": 0.2851782363977486,
+      "itae": 0.0037596301772859025,
+      "steady_state": 0.9999999999999997,
+      "gain_margin_db": 0.0,
+      "phase_margin_deg": 0.0,
+      "gain_crossover_rad_s": 0.0,
+      "margins_valid": 0.0
+    },
+    "velocity": {
+      "stable": 1.0,
+      "overshoot_pct": 15.528248507671853,
+      "rise_time_s": 0.2551594746716698,
+      "settling_time_s": 0.3302063789868668,
+      "itae": 0.1384625561548841,
+      "steady_state": 0.9999999994723807,
+      "gain_margin_db": 0.0,
+      "phase_margin_deg": 0.0,
+      "gain_crossover_rad_s": 0.0,
+      "margins_valid": 0.0
+    },
+    "position": {
+      "stable": 1.0,
+      "overshoot_pct": 0.0,
+      "rise_time_s": 2.1913696060037524,
+      "settling_time_s": 3.8974358974358974,
+      "itae": 0.9969787455126058,
+      "steady_state": 0.999664537372119,
+      "gain_margin_db": 0.0,
+      "phase_margin_deg": 0.0,
+      "gain_crossover_rad_s": 0.0,
+      "margins_valid": 0.0
+    },
+    "altitude": {
+      "stable": 1.0,
+      "overshoot_pct": 0.0,
+      "rise_time_s": 3.8974358974358974,
+      "settling_time_s": 6.9793621013133205,
+      "itae": 4.818677135160636,
+      "steady_state": 0.9547090983836204,
+      "gain_margin_db": 0.0,
+      "phase_margin_deg": 0.0,
+      "gain_crossover_rad_s": 0.0,
+      "margins_valid": 0.0
+    },
+    "altitude_velocity_inner": {
+      "stable": 1.0,
+      "overshoot_pct": 15.5544126293121,
+      "rise_time_s": 0.6404002501563477,
+      "settling_time_s": 0.8255159474671669,
+      "itae": 0.862769449016273,
+      "steady_state": 0.9997735769495967,
+      "gain_margin_db": 0.0,
+      "phase_margin_deg": 0.0,
+      "gain_crossover_rad_s": 0.0,
+      "margins_valid": 0.0
+    }
+  },
+  "betaflight_hint": {
+    "altitude_cascade_normalized": {
+      "kp_per_s": 0.4,
+      "ki_per_s2": 1.44,
+      "kd_per_s": 2.16
+    },
+    "angle_p_gain": 250.0,
+    "p_roll_pitch_hint": 150.0,
+    "note": "altitude_cascade_normalized 是归一化串级增益；固件 ap_altitude_* 请用 modeling.altitude_loop --sitl 生成。"
+  }
+}

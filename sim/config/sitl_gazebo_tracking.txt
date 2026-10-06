@@ -1,0 +1,47 @@
+# BF_Anti SITL config for direct RC tracking (ANGLE mode, no ALT/POS HOLD).
+# The mission runner sends all four stick channels at 50 Hz from the guidance
+# bridge, so the flight controller must stay in ANGLE + manual throttle mode.
+feature RX_UDP
+aux 0 0 0 1700 2100
+aux 1 1 1 1700 2100
+set ap_hover_throttle = 1545
+set ap_altitude_p = 33
+set ap_altitude_i = 100
+set ap_altitude_d = 18
+set ap_altitude_f = 0
+set ap_position_p = 2
+set ap_position_i = 0
+set ap_position_d = 80
+set ap_position_a = 0
+set ap_position_f = 2
+set ap_position_cutoff = 20
+set ap_stop_threshold = 10
+set ap_throttle_max = 2000
+set ap_max_angle = 15
+set ap_velocity_drag_coeff = 30
+set ap_max_velocity = 5000
+set ap_offboard_vel_p = 80
+set ap_offboard_vel_d = 0
+set ap_offboard_accel_ff = 100
+set ap_offboard_drag = 20
+set ap_offboard_pos_gain = 300
+set ap_offboard_brake_gain = 0
+set ap_offboard_rate_p = 2000
+set ap_yaw_mode = VELOCITY
+set ap_yaw_p = 500
+set ap_yaw_d = 100
+set ap_max_yaw_rate = 300
+set ap_min_forward_velocity = 100
+set yaw_motors_reversed = OFF
+set angle_limit = 60
+set angle_p_gain = 80
+set p_roll = 100
+set i_roll = 80
+set d_roll = 50
+set p_pitch = 100
+set i_pitch = 84
+set d_pitch = 50
+set pwr_on_arm_grace = 0
+set runaway_takeoff_prevention = OFF
+set failsafe_delay = 200
+set gyro_overflow_detect = ALL

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """硬件链路诊断: 发送 1kHz 方波, 眼镜应看到明暗交替竖条"""
-import spidev, time
+import spidev
 
 spi = spidev.SpiDev()
 spi.open(1, 0)

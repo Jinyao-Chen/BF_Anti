@@ -5,7 +5,6 @@ GStreamer support) by pulling frames directly from a Gst.appsink.
 OpenCV is still used for imshow/putText if a display is available.
 """
 import os
-import sys
 import time
 import argparse
 import threading

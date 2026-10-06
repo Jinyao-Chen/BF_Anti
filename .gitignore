@@ -1,6 +1,13 @@
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+
+# 临时/中间产物
+*.whl
+*.tar.gz
+nohup.out
 
 # Build artifacts
 pico_fw/build/
