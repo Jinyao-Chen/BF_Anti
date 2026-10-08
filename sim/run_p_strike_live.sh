@@ -40,6 +40,9 @@ TARGET_WIDTH="${TARGET_WIDTH:-$TARGET_WIDTH_DEFAULT}"
 # MASK_HORIZ=none|pos|vel|both：把飞控给**制导律**的水平位置/速度清零，
 # 用来预演"无 GPS / 无光流"的真机（none=正常仿真）。见 run_p_vision_strike.py --help。
 MASK_HORIZ="${MASK_HORIZ:-none}"
+# 靶机匀速运动（可选）：TARGET_VEL_E / TARGET_VEL_N（m/s，ENU）。不设则靶机静止。
+TARGET_VEL_E="${TARGET_VEL_E:-}"
+TARGET_VEL_N="${TARGET_VEL_N:-}"
 # YOLO_DIRECT=1: 不走 SSH 隧道，直接把检测服务放在 YOLO_HOST 上（例如 RDK X5 直连）。
 YOLO_DIRECT="${YOLO_DIRECT:-0}"
 # 远程拉起服务的命令（换板子/换机器时改这里；默认是 GPU 机上的 start_yolo.sh）。
@@ -93,6 +96,7 @@ ensure_yolo() {
 cleanup() {
     echo ""
     echo "[live] 清理 SITL / Gazebo ..."
+    if [ -n "${TGT_PID}" ]; then kill "${TGT_PID}" 2>/dev/null || true; fi
     if [ -n "${TUNNEL_PID}" ]; then kill "${TUNNEL_PID}" 2>/dev/null || true; fi
     if [ -n "${SIM_PID}" ]; then kill "${SIM_PID}" 2>/dev/null || true; fi
     pkill -f "betaflight_SITL_SITL_GAZEBO.elf" 2>/dev/null || true
@@ -130,6 +134,17 @@ for _ in $(seq 1 60); do
     sleep 1
 done
 sleep 8
+
+# 靶机匀速运动（可选）：在打击前起一个后台进程持续发 cmd_vel
+TGT_PID=""
+if [ -n "${TARGET_VEL_E}" ] || [ -n "${TARGET_VEL_N}" ]; then
+    echo "[live] 靶机匀速运动：E=${TARGET_VEL_E:-0} N=${TARGET_VEL_N:-0} m/s"
+    python3 "${SCRIPT_DIR}/move_target.py" --vel-e "${TARGET_VEL_E:-0}" \
+        --vel-n "${TARGET_VEL_N:-0}" --duration "$((DURATION + 20))" --print-hz 0.5 \
+        > /tmp/live_target.log 2>&1 &
+    TGT_PID=$!
+    sleep 1
+fi
 
 echo "[live] 开始打击（窗口标题: BF_Anti P-only visual strike）..."
 # YOLO=1 时用远程真检测（默认走 SSH 隧道到 127.0.0.1:9300），否则用合成 bbox
