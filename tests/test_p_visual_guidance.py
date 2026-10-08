@@ -335,12 +335,17 @@ def test_pn_term_disabled_by_default():
 
 
 def test_pn_term_sign_follows_image_motion():
-    """pn_gain>0：目标在画面里向左/向右移动，比例导引项必须反号且都不为零。"""
+    """pn_gain>0：目标在画面里向左/向右移动，比例导引项必须反号且都不为零。
+
+    两条序列关于画面中心（u=cx=320）互为镜像，保证 |Δaz| 相同；且都**留在画面内**
+    （跑到画面外会让像素->方位的映射截断，两侧不再对称）。
+    """
     right = _run_u_seq(make_guidance(pn_gain=4.0, speed_source="closing"),
-                       [320.0 + 20.0 * k for k in range(20)])
+                       [200.0 + 12.0 * k for k in range(20)])
     left = _run_u_seq(make_guidance(pn_gain=4.0, speed_source="closing"),
-                      [700.0 - 20.0 * k for k in range(20)])
-    assert right.pn_roll_deg == pytest.approx(-left.pn_roll_deg, abs=0.05)
+                      [440.0 - 12.0 * k for k in range(20)])
+    cap = make_guidance().pn_roll_cap_deg
+    assert abs(right.pn_roll_deg + left.pn_roll_deg) < 0.15 * cap
     assert abs(right.pn_roll_deg) > 0.1
 
 

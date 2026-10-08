@@ -154,7 +154,10 @@ class PVisualGuidance:
         pn_gain: float = 0.0,
         pn_min_speed_mps: float = 2.5,
         pn_rate_lpf_s: float = 0.35,
-        pn_roll_cap_deg: float = 8.0,
+        # 8 是 2026-10-06 为压住 λ̇ 噪声 bang-bang 设的保守值；2026-10-08 实测：
+        # λ̇ 改由几何量 az_los 窗口差分后噪声掉了一个量级，8 反而把横穿靶的横向权限卡死：
+        # cap8 横穿脱靶 3.06 m；cap15+增益6 横穿 0.34/0.50、静止 0.27/0.43、逃逸 0.25（5/5 命中）。
+        pn_roll_cap_deg: float = 15.0,
         pn_vc_min_mps: float = 2.0,
         pn_vc_max_mps: float = 12.0,
         speed_source: str = "fc",

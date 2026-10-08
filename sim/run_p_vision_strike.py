@@ -390,6 +390,10 @@ def build_guidance(args, image_size) -> PVisualGuidance:
         kp_velalign=args.kp_velalign,
         pn_gain=args.pn_gain,
         pn_min_speed_mps=args.pn_min_speed,
+        pn_roll_cap_deg=args.pn_roll_cap,
+        pn_rate_lpf_s=args.pn_rate_lpf,
+        pn_vc_min_mps=args.pn_vc_min,
+        pn_vc_max_mps=args.pn_vc_max,
         speed_source=args.speed_source,
         velalign_min_speed=args.velalign_min_speed,
         velalign_soft_deg=args.velalign_soft,
@@ -544,6 +548,15 @@ def main() -> int:
                              "a=N*Vc*λ̇（λ̇ 取跟踪器框中心像素速率 / fx，Vc 取视觉接近率）"
                              "折算滚转指令，可替代依赖飞控速度的 velalign ——"
                              "但**启用即超出纯 P 契约**（引入视线角速率项）")
+    parser.add_argument("--pn-roll-cap", type=float, default=15.0,
+                        help="比例导引项软饱和上限（度）：cap*tanh(raw/cap)，防止它独占滚转"
+                             "（8 偏保守；横穿靶需要更大横向权限时可放到 15）")
+    parser.add_argument("--pn-rate-lpf", type=float, default=0.35,
+                        help="视线角速率 λ̇ 的一阶低通时间常数（s）")
+    parser.add_argument("--pn-vc-min", type=float, default=2.0,
+                        help="比例导引项里 Vc 的下钳位（m/s）")
+    parser.add_argument("--pn-vc-max", type=float, default=12.0,
+                        help="比例导引项里 Vc 的上钳位（m/s），避免噪声把增益放大")
     parser.add_argument("--pn-min-speed", type=float, default=2.5,
                         help="比例导引项的低速门（m/s）：速度低于此值不产生横向加速度指令"
                              "（起飞/悬停时对准交给偏航通道）")
