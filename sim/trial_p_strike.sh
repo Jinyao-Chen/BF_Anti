@@ -55,6 +55,15 @@ if [ "${READY}" != "1" ]; then
 fi
 echo "[${NAME}] MSP 就绪；再等 40 s 让固件接管 FDM ..."
 sleep 40
+# 靶机匀速运动（可选）：TARGET_VEL_E / TARGET_VEL_N（m/s，ENU）。不设则靶机静止。
+TGT_PID=""
+if [ -n "${TARGET_VEL_E:-}" ] || [ -n "${TARGET_VEL_N:-}" ]; then
+    echo "[${NAME}] 靶机匀速运动：E=${TARGET_VEL_E:-0} N=${TARGET_VEL_N:-0} m/s"
+    python3 sim/move_target.py --vel-e "${TARGET_VEL_E:-0}" --vel-n "${TARGET_VEL_N:-0}" \
+        --duration 150 --print-hz 0.5 > "/tmp/trial_${NAME}_target.log" 2>&1 &
+    TGT_PID=$!
+    sleep 1
+fi
 echo "[${NAME}] 开始打击（最长 90 s，逐秒进度写 /tmp/trial_${NAME}.out）"
 timeout 90 python3 sim/run_p_vision_strike.py --yolo-host "${YOLO_HOST}" --yolo-port "${YOLO_PORT}" \
     --min-conf 0.10 --inner-model "" --cam-link cam_link --view camera \
@@ -96,4 +105,5 @@ if [ "${TRACKPCT}" -lt 20 ]; then
     echo "[${NAME}] WARNING: 有效跟踪帧仅 ${TRACKPCT}% -> 本次数据多半是丢检测，不是脱靶，请勿采信"
 fi
 echo "[${NAME}] min_truth_range=${MIN} m   ${LOCK}"
+[ -n "${TGT_PID}" ] && kill "${TGT_PID}" 2>/dev/null
 kill $SIM_PID 2>/dev/null; pkill -9 -f "gz sim" 2>/dev/null; pkill -9 -f betaflight_SITL 2>/dev/null
