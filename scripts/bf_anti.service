@@ -4,11 +4,12 @@ After=multi-user.target
 Wants=multi-user.target
 
 [Service]
-Type=simple
-User=BOARD_USER
-WorkingDirectory=BOARD_HOME/BF_Anti
+# 安装时由 scripts/service_ctl.sh 渲染下面两个占位符，见该脚本 print 子命令；
+# 不要在这里写死用户名与路径（板端用户不一定是当前用户）。
+User=__BOARD_USER__
+WorkingDirectory=__BASE_DIR__
 Environment="DISPLAY=:0"
-Environment="BF_MODEL=BOARD_HOME/BF_Anti/model/v1_yolov8_mAP50_0.879_bayese_640x640_nv12.bin"
+Environment="BF_MODEL=__BASE_DIR__/model/v1_yolov8_mAP50_0.879_bayese_640x640_nv12.bin"
 
 # 飞行追踪 (需要飞控已连接, 接收机已对频)
 ExecStartPre=/bin/sleep 5
@@ -18,7 +19,7 @@ ExecStart=__BASE_DIR__/run_detect.sh fly
 Restart=on-failure
 RestartSec=3
 
-# 优雅停止: SIGINT → detect.py 的 finally 块会 DISARM
+# 优雅停止: SIGINT -> detect.py 的 finally 块会 DISARM
 KillSignal=SIGINT
 TimeoutStopSec=5
 

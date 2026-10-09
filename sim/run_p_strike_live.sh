@@ -21,12 +21,14 @@ LOG="${LOG:-/tmp/p_strike_live.csv}"
 
 SIM_PID=""
 TUNNEL_PID=""
-YOLO_SSH="${YOLO_SSH:-GPU_USER@GPU_HOST}"
 YOLO_HOST="${YOLO_HOST:-127.0.0.1}"
+# SSH 隧道目标：默认「当前用户 @ $YOLO_HOST」；连远程 GPU 机时显式给 YOLO_SSH 或 YOLO_USER+YOLO_HOST
+YOLO_USER="${YOLO_USER:-${USER}}"
+YOLO_SSH="${YOLO_SSH:-${YOLO_USER}@${YOLO_HOST}}"
 # 检测后端：pt = 我们的 YOLOv8-L(anti_uav_best.pt, :9300)
 #           onnx = 第三方的 YOLOv8n(v1_yolov8_mAP50_0.879.onnx, :9301)
 # 两个后端都在 GPU 机的 **/dev/nvidia0** (= GPU-40c96051 = nvidia-smi index 1) 上，
-# 由 start_yolo.sh 按 UUID 绑卡；绝不能碰 nvidia-smi index 0（别人 其他用户 的卡）。
+# 由 start_yolo.sh 按 UUID 绑卡；绝不能碰 nvidia-smi index 0（其他用户的卡）。
 YOLO_BACKEND="${YOLO_BACKEND:-pt}"
 case "${YOLO_BACKEND}" in
     onnx) YOLO_PORT_DEFAULT=9301 ;;
@@ -45,8 +47,9 @@ TARGET_VEL_E="${TARGET_VEL_E:-}"
 TARGET_VEL_N="${TARGET_VEL_N:-}"
 # YOLO_DIRECT=1: 不走 SSH 隧道，直接把检测服务放在 YOLO_HOST 上（例如 RDK X5 直连）。
 YOLO_DIRECT="${YOLO_DIRECT:-0}"
-# 远程拉起服务的命令（换板子/换机器时改这里；默认是 GPU 机上的 start_yolo.sh）。
-YOLO_REMOTE_CMD="${YOLO_REMOTE_CMD:-cd REMOTE_WS && (setsid bash start_yolo.sh ${YOLO_BACKEND} >> logs/live_remote_start.log 2>&1 &)}"
+# 远程工作目录 / 远程拉起服务的命令（换板子、换机器时设 YOLO_REMOTE_DIR 或 YOLO_REMOTE_CMD）。
+YOLO_REMOTE_DIR="${YOLO_REMOTE_DIR:-.}"
+YOLO_REMOTE_CMD="${YOLO_REMOTE_CMD:-cd ${YOLO_REMOTE_DIR} && (setsid bash start_yolo.sh ${YOLO_BACKEND} >> logs/live_remote_start.log 2>&1 &)}"
 
 probe_yolo() {
     local P_HOST="${1:-127.0.0.1}"

@@ -2,6 +2,8 @@
 """
 X5 LSIO pinmux register dumper & pull-up disabler.
 
+（已被同目录 x5_pinmux_tool_v2.py 的字节级解码版取代，此处保留供对照。）
+
 The LSIO iomuxc at 0x34180000 controls the 40-pin header GPIOs.
 Each pin has a 4-byte config register. This tool:
   1. Dumps the first 64 registers so we can find the UART1 RX pin

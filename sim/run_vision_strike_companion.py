@@ -89,7 +89,8 @@ def main() -> int:
     parser.add_argument("--hit-radius", type=float, default=1.0)
     parser.add_argument("--synthetic", action="store_true",
                         help="用真值投影生成 bbox（无 YOLO），验证感知-制导-控制链路")
-    parser.add_argument("--yolo-host", default="GPU_HOST")
+    parser.add_argument("--yolo-host", default=os.environ.get("YOLO_HOST", "127.0.0.1"),
+                        help="YOLO 服务地址；默认取 $YOLO_HOST，否则本机 127.0.0.1")
     parser.add_argument("--yolo-port", type=int, default=9300)
     parser.add_argument("--nav-constant", type=float, default=4.0)
     parser.add_argument("--max-speed", type=float, default=10.0)

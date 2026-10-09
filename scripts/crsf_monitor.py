@@ -6,12 +6,13 @@
   python3 scripts/crsf_monitor.py /dev/ttyS3 --baud 420000
 """
 
+import os
 import sys
 import time
 import argparse
 import threading
 
-sys.path.insert(0, "BOARD_HOME/BF_Anti")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from crsf import CRSFParser
 import serial
 

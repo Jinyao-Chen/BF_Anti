@@ -594,7 +594,8 @@ def main() -> int:
     # 感知
     parser.add_argument("--synthetic", action="store_true",
                         help="真值投影合成 bbox（与 YOLO 同接口），先验证制导-控制链路")
-    parser.add_argument("--yolo-host", default="GPU_HOST")
+    parser.add_argument("--yolo-host", default=os.environ.get("YOLO_HOST", "127.0.0.1"),
+                        help="YOLO 服务地址；默认取 $YOLO_HOST，否则本机 127.0.0.1（远程 GPU 先建 SSH 隧道）")
     parser.add_argument("--yolo-port", type=int, default=9300)
     parser.add_argument("--async-yolo", type=int, default=1,
                         help="1=检测放后台线程（控制回路不被推理阻塞）")

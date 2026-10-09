@@ -7,7 +7,7 @@ NAME="$1"; shift
 LOG="/tmp/trial_${NAME}.csv"
 # 检测后端（与 run_p_strike_live.sh 同一套开关）：
 #   YOLO_BACKEND=pt    我们的 YOLOv8-L  anti_uav_best.pt      -> :9300, --target-width 2.0
-#   YOLO_BACKEND=onnx  第三方的 YOLOv8n  v1_yolov8_mAP50.onnx   -> :9301, --target-width 2.38
+#   YOLO_BACKEND=onnx  第三方 YOLOv8n  v1_yolov8_mAP50.onnx   -> :9301, --target-width 2.38
 # 显式给 YOLO_PORT / TARGET_WIDTH 时以显式值为准。
 YOLO_HOST="${YOLO_HOST_OVERRIDE:-127.0.0.1}"
 YOLO_BACKEND="${YOLO_BACKEND:-pt}"
@@ -20,7 +20,8 @@ TARGET_WIDTH="${TARGET_WIDTH:-$TARGET_WIDTH_DEFAULT}"
 # 防呆：YOLO 后端不通时，真检测永远不返回 -> 全程 SEARCH -> "脱靶"数字毫无意义
 # （已实测踩坑：隧道静默断开导致 5 发数据作废）
 if ! python3 -c "import socket;socket.create_connection(('${YOLO_HOST}',${YOLO_PORT}),timeout=4)" 2>/dev/null; then
-    echo "[${NAME}] ABORT: YOLO 后端 ${YOLO_HOST}:${YOLO_PORT} 不可用（隧道: ssh -N -L ${YOLO_PORT}:127.0.0.1:9300 GPU_USER@GPU_HOST）"
+    echo "[${NAME}] ABORT: YOLO 后端 ${YOLO_HOST}:${YOLO_PORT} 不可用"
+    echo "        远程 GPU 需先建隧道: ssh -N -L ${YOLO_PORT}:127.0.0.1:9300 <GPU_USER>@<GPU_HOST>"
     exit 2
 fi
 # 输入降级预演（sim2real）：MASK_HORIZ=none|pos|vel|both，见 run_p_vision_strike.py 帮助

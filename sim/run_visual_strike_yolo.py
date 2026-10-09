@@ -3,7 +3,7 @@
 
 与 ``run_visual_strike.py`` 的区别：
 * 目标图像来自 Gazebo ``camera_sensor`` 真实渲染帧，而不是真值投影；
-* 检测来自远程 GPU_HOST:9300 的 YOLO 服务（固定到 /dev/nvidia0 UUID）；
+* 检测来自 --yolo-host（默认 $YOLO_HOST，否则 127.0.0.1；远程 GPU 常走 SSH 隧道）的 YOLO 服务；
 * 目标 3D 状态由 ``TargetEstimator`` 从 YOLO bbox + 本机位姿估计；
 * 录像保存真实相机帧 + 检测框 + 阶段/距离 HUD；
 * 控制仍走 RC ANGLE + AUX3 ALT_HOLD。
@@ -487,7 +487,8 @@ def main() -> int:
     parser.add_argument("--search-timeout", type=float, default=20.0)
     parser.add_argument("--rate", type=float, default=20.0)
     parser.add_argument("--max-angle", type=float, default=60.0)
-    parser.add_argument("--yolo-host", default="GPU_HOST")
+    parser.add_argument("--yolo-host", default=os.environ.get("YOLO_HOST", "127.0.0.1"),
+                        help="YOLO 服务地址；默认取 $YOLO_HOST，否则本机 127.0.0.1")
     parser.add_argument("--yolo-port", type=int, default=9300)
     parser.add_argument("--yolo-conf", type=float, default=0.25)
     parser.add_argument("--yaw-sign", type=float, default=-1.0,

@@ -9,7 +9,7 @@
 
     # 依赖: rdk_model_zoo 的 Ultralytics YOLO 运行时 + opencv-python + numpy
     git clone https://github.com/D-Robotics/rdk_model_zoo.git ~/rdk_model_zoo
-    ln -s ~/rdk_model_zoo ~/BF_Anti/rdk_model_zoo
+    ln -s ~/rdk_model_zoo ~/BOARD_HOME/BF_Anti/rdk_model_zoo
     python3 sim/yolo_server_board.py \
         --model-path model/v1_yolov8_mAP50_0.879_bayese_640x640_nv12.bin \
         --label-file model/labels.txt --host 0.0.0.0 --port 9300
@@ -19,7 +19,7 @@
     # 直连
     YOLO_DIRECT=1 YOLO_HOST=<板子IP> YOLO=1 GUI=1 ./sim/run_p_strike_live.sh
     # 或沿用 SSH 隧道（板上开 sshd）
-    YOLO_SSH=BOARD_USER@<板子IP> YOLO_REMOTE_CMD='cd ~/BF_Anti && python3 sim/yolo_server_board.py ...' \
+    YOLO_SSH=<板子用户>@<板子IP> YOLO_REMOTE_CMD='cd ~/BF_Anti && python3 sim/yolo_server_board.py ...' \
         YOLO=1 GUI=1 ./sim/run_p_strike_live.sh
 
 类别名注意：本机客户端的 TARGET_NAMES 只认 {"copter_drone","motor_drone"}。
