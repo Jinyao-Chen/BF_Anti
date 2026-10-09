@@ -216,7 +216,7 @@
       </plugin>
     </model>
 
-    <!-- P-only 高空场景：靶机高于待命高度 20 m（HANDOFF P0-1 工况）。
+    <!-- P-only 高空场景：靶机高于待命高度 20 m（收尾文档 §4 的阻塞工况（docs/interception/2026-10-09-sim-stage-closeout.md））。
          注：Gazebo x = ENU 北，Gazebo y = ENU 东（见 gazebo_xyz_to_enu）。
          固定靶机：初始放在本机前方 30 m、上方 10 m。
          44° 上仰相机在初始巡航时可以看到它；后续接近/俯冲由 BF_Anti 制导控制。 -->
