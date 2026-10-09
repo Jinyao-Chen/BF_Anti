@@ -71,7 +71,7 @@ python3 sim/run_p_vision_strike.py --synthetic --duration 30 --log /tmp/kin.csv
 | `calibrate_rotor_force.py` / `compute_hover_throttle.py` | 悬停油门与旋翼力标定 |
 | `plot_*.py` | 轨迹/3D/对比图（`plot_trajectory.py` 被 `run_p_vision_strike.py --plot` 直接 import） |
 | `summarize_speed_sweep.py` / `run_repeat_stats.py` | 批量试验汇总统计 |
-| `tools/xy_probes/` | **归档**：XY 速度外环阶段的一次性探针（9 个），仅作历史参考，未做风格清理 |
+| `tools/legacy_xy_probes/` | **归档**：XY 速度外环阶段的一次性探针（9 个），仅作历史参考，未做风格清理（见 `tools/README.md`） |
 
 ---
 
@@ -99,6 +99,7 @@ sim/results/
 ```
 
 约定：**报告（`.md`）跟数据放一起**，`docs/` 只放结论性文档（见 [docs/README.md](../docs/README.md)）。
+内部/交流材料（交接、周报、审计、汇报 PPT）**不在本仓库**，见 `../BF_Anti_materials/internal/`。
 踩坑提示：`trial_p_strike.sh` 的日志在 `/tmp/trial_<名>.{out,csv}`，**同名会覆盖上一发**，批量跑要换名。
 
 ---
@@ -118,7 +119,7 @@ sim/results/
 
 ## 7. 踩坑清单（都是实测踩过的）
 
-1. **`/dev/nvidia0` ≠ nvidia-smi index 0**。前者是 `0000:41:00.0`（index 1 = `GPU-40c96051-...`），index 0 是别人的卡。按 UUID 绑。
+1. **`/dev/nvidia0` ≠ nvidia-smi index 0**。前者是 `0000:41:00.0`（index 1 = `GPU-40c96051-...`），index 0 是其他用户的卡。按 UUID 绑。
 2. **ultralytics 会覆写 `CUDA_VISIBLE_DEVICES`**：`select_device()` 里 `os.environ[...] = device`，所以 `device=0` 会把 UUID 覆盖成 `"0"`。要传 nvidia-smi index。
 3. **换检测模型必须重标 `--target-width`**：`r = fx·W/s_px`。ONNX 的框比 .pt 宽 18% → 2.0 要改 2.38，否则高度环被带偏。
 4. **类别名不同步 = 静默失效**：检测全被丢掉，表现是"全程 SEARCH"，看起来像制导坏了。

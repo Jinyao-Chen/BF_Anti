@@ -39,7 +39,7 @@ def test_lateral_offset_20m_hits():
 
 
 def test_target_above_25m_hits():
-    """HANDOFF P0-1 的阻塞工况：目标高于本机 25 m。"""
+    """原 P0-1 阻塞工况（目标高于本机 25 m）的回归，见 sim 阶段收尾文档 §4。"""
     res = run(target_east=0.0, target_north=50.0, target_up=35.0)
     assert res.hit is True, f"min_range={res.min_range}"
     assert res.min_range < 0.8

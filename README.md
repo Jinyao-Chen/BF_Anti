@@ -87,9 +87,9 @@ BF_Anti/
 ├── perception/               相机几何 / 目标估计 / 3D KF
 ├── modeling/                 理论模型与整定（四旋翼、高度环、PID）
 ├── sim/                      Gazebo SITL 仿真工作区 → 见 sim/README.md
-├── docs/                     设计与进展文档 → 见 docs/README.md（索引）
+├── docs/                     文档：架构总览 + 设计与进展 → 见 docs/README.md（索引）
 ├── pico_fw/                  Pico 协处理器固件 (C + PIO 汇编)
-├── tests/                    单元测试（148 项）
+├── tests/                    单元测试（153 项）
 └── scripts/
     ├── test_msp_override.py  BOXMSPOVERRIDE 地面测试
     ├── rc_monitor.py         RC 通道实时监控
@@ -270,7 +270,7 @@ Gazebo/Betaflight SITL 下的**纯比例（P-only）视觉制导**打击闭环�
 [检测后端实测对比](docs/interception/2026-10-05-onnx-nvidia0-gpu-test.md)
 
 ```bash
-# 单元测试（纯 P 契约 + 运动学回归，共 148 项）
+# 单元测试（纯 P 契约 + 运动学回归，共 153 项）
 python3 -m pytest -q
 
 # 运动学包线：静态/径向目标命中，横向匀速目标记录滞后
@@ -332,10 +332,10 @@ GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index
 | 入口 | 内容 |
 |------|------|
 | [`docs/README.md`](docs/README.md) | **文档总索引**：按时间线的主线文档 + 归档 + 写文档约定 |
-| [`docs/HANDOFF.md`](docs/HANDOFF.md) | 交接总纲：目标、环境、固件/伴机现状、红线、待办、文件清单、常用命令 |
+| [`docs/architecture.md`](docs/architecture.md) | **代码地图**：两条链路分层、模块职责、依赖方向、改哪里跑什么 |
 | [`sim/README.md`](sim/README.md) | 仿真工作区地图：入口脚本 / 库模块 / 分析工具 / 世界 / 踩坑清单 |
 | [`modeling/README.md`](modeling/README.md) | 理论模型与整定工具链 |
 | [`sim/results/`](sim/results/) | 全部验证数据与两类分析报告（报告跟数据放一起） |
 
 代码规范：Python 以 `python3 -m flake8 --select=E9,F63,F7,F82,F401,F841,E722,W605` 零告警为准，
-`python3 -m pytest -q` 全绿（当前 148 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
+`python3 -m pytest -q` 全绿（当前 153 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
