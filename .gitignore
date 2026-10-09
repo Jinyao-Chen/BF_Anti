@@ -22,6 +22,13 @@ betaflight
 rdk_model_zoo
 Anti-UAV/
 
+# Internal / communication materials (NOT in this repo)
+# 交接、周报、审计、汇报 PPT、申请书、个人材料一律放库外：../BF_Anti_materials/internal/
+# 见 docs/README.md 的「写文档的约定」。
+docs/HANDOFF.md
+docs/beamer/weekly_*
+docs/beamer/figs/
+
 # Presentation / proposal / experiment materials
 # (canonical copy lives outside this repo: ../BF_Anti_materials)
 *.pptx
