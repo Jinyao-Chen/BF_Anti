@@ -22,10 +22,13 @@ betaflight
 rdk_model_zoo
 Anti-UAV/
 
-# Internal / communication materials (NOT in this repo)
-# 交接、周报、审计、汇报 PPT、申请书、个人材料一律放库外：../BF_Anti_materials/internal/
-# 见 docs/README.md 的「写文档的约定」。
+# Internal / communication materials
+# 这些文件就放在仓库目录里方便查阅（路径与原位置一致），但**永远不提交**：
+# 交接、周报、审计、汇报 PPT、申请书、个人材料 -> 一律在此忽略。
+# 规范备份（库外，独立于本仓库）：../BF_Anti_materials/internal/
+# 约定见 docs/README.md 的「写文档的约定」。
 docs/HANDOFF.md
+docs/interception/*-firmware-fork-audit.md
 docs/beamer/weekly_*
 docs/beamer/figs/
 
