@@ -12,25 +12,23 @@ nohup.out
 # Build artifacts
 pico_fw/build/
 
-# Large files
+# 大文件 / 媒体
 *.mp4
-# 例外：讲稿内的三场景闭环录像属交付物（docs/beamer/videos/*.mp4，共约 6.7 MB）
-!docs/beamer/videos/*.mp4
 
 # Symlinks
 betaflight
 rdk_model_zoo
 Anti-UAV/
 
-# Internal / communication materials
-# 这些文件就放在仓库目录里方便查阅（路径与原位置一致），但**永远不提交**：
-# 交接、周报、审计、汇报 PPT、申请书、个人材料 -> 一律在此忽略。
-# 规范备份（库外，独立于本仓库）：../BF_Anti_materials/internal/
-# 约定见 docs/README.md 的「写文档的约定」。
-docs/HANDOFF.md
-docs/interception/*-firmware-fork-audit.md
-docs/beamer/weekly_*
-docs/beamer/figs/
+# ---------------------------------------------------------------------------
+# 文档（本地保留，不提交）
+# 我们开发的文档与实验报告就放在仓库目录里方便查阅，但**永远不提交**：
+#   docs/                 设计与进展、架构总览、索引、讲稿（PDF/tex）与录像
+#   sim/results/**/*.md   跟数据放一起的复盘/分析报告
+# 规范备份（库外、独立于本仓库）：../BF_Anti_materials/internal/
+# ---------------------------------------------------------------------------
+docs/
+sim/results/**/*.md
 
 # Presentation / proposal / experiment materials
 # (canonical copy lives outside this repo: ../BF_Anti_materials)

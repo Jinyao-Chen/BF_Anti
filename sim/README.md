@@ -1,7 +1,7 @@
 # sim/ — Gazebo SITL 仿真工作区
 
 > 纯 P 视觉制导反无人机打击的仿真链路。真实机载链路见顶层 [README.md](../README.md)，
-> 文档索引见 [../docs/README.md](../docs/README.md)。
+> 设计与进展文档在本地 `../docs/`（**未纳入版本控制**）。
 
 ---
 
@@ -34,7 +34,7 @@ python3 sim/run_p_vision_strike.py --synthetic --duration 30 --log /tmp/kin.csv
 | `trial_p_strike.sh` | 无头单发试验 + 统计（`sim/trial_<名>.out`/`.csv`） | `YOLO_PORT`/`DUMP_DIR`/`DUMP_HZ` 可注入；后端不通会 ABORT 而不是产生假脱靶 |
 | `launch_sitl.sh` | 启动 Betaflight SITL + Gazebo | `BF_ANTI_WORLD` 选世界，`--headless` 无界面 |
 | `sim_restart.sh` | 安全重启仿真（避免 `pkill` 命中调用者自身） | 每次试验前必跑 |
-| `yolo_server_board.py` | RDK X5 板端检测服务（协议与 GPU 版一致） | 部署见 [x5-as-inference-server](../docs/interception/2026-10-01-x5-as-inference-server.md) |
+| `yolo_server_board.py` | RDK X5 板端检测服务（协议与 GPU 版一致） | 部署见本地文档 `docs/interception/2026-10-01-x5-as-inference-server.md`（未纳入版本控制） |
 | `eval_detector_frames.py` | **换检测模型必跑**：在落盘的原始帧上对比两个模型的召回/置信度/框宽 | 输出隐含 `W_eff` -> 决定 `--target-width` |
 
 早期阶段的运行器仍在（`run_visual_strike*.py`、`run_intercept_mission.py`、`run_xy_velocity_test.py`、
@@ -98,7 +98,7 @@ sim/results/
   merge_upstream_2026-09/   # 固件合并期的高度环数据
 ```
 
-约定：**报告（`.md`）跟数据放一起**，`docs/` 只放结论性文档（见 [docs/README.md](../docs/README.md)）。
+约定：**报告（`.md`）跟数据放一起**（`sim/results/**/*.md`，与 `docs/` 一样**本地保留、不提交**）。
 内部/交流材料（交接、周报、审计、汇报 PPT）**不在本仓库**，见 `../BF_Anti_materials/internal/`。
 踩坑提示：`trial_p_strike.sh` 的日志在 `/tmp/trial_<名>.{out,csv}`，**同名会覆盖上一发**，批量跑要换名。
 

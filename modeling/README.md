@@ -189,8 +189,8 @@ n = 9, R² = 0.57
 
 原文模型整体正确，但存在小角度线性化和符号书写问题。详细推导见：
 
-- `docs/interception/2026-09-18-theory-model-and-progress.md`
-- `docs/interception/2026-09-19-simulink-model-review-corrected.md`
+- `docs/interception/2026-09-18-theory-model-and-progress.md`（本地，未纳入版本控制）
+- `docs/interception/2026-09-19-simulink-model-review-corrected.md`（同上）
 
 核心修正：
 

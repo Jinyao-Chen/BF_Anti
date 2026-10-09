@@ -87,7 +87,7 @@ BF_Anti/
 ├── perception/               相机几何 / 目标估计 / 3D KF
 ├── modeling/                 理论模型与整定（四旋翼、高度环、PID）
 ├── sim/                      Gazebo SITL 仿真工作区 → 见 sim/README.md
-├── docs/                     文档：架构总览 + 设计与进展 → 见 docs/README.md（索引）
+├── docs/                     文档（本地保留、未纳入版本控制；见 .gitignore）
 ├── pico_fw/                  Pico 协处理器固件 (C + PIO 汇编)
 ├── tests/                    单元测试（153 项）
 └── scripts/
@@ -265,9 +265,8 @@ Gazebo/Betaflight SITL 下的**纯比例（P-only）视觉制导**打击闭环�
 | 2026-09-28 首版 | 5 次运行 3 次进入 0.8 m 命中半径（最近 0.45 m） |
 | **2026-10-01 稳定性修复后** | **15/15 全部命中，最近真值距离 0.163 ~ 0.441 m** |
 
-文档：[纯 P 制导设计与标定](docs/interception/2026-09-28-p-only-visual-guidance.md) ·
-[稳定性根因与修复](sim/results/p_strike/stability_2026-10-01.md) ·
-[检测后端实测对比](docs/interception/2026-10-05-onnx-nvidia0-gpu-test.md)
+文档（均在本地 `docs/` 与 `sim/results/`，**未纳入版本控制**）：纯 P 制导设计与标定 ·
+稳定性根因与修复 · 检测后端实测对比。
 
 ```bash
 # 单元测试（纯 P 契约 + 运动学回归，共 153 项）
@@ -308,8 +307,8 @@ YOLO_PORT=9301 ./sim/trial_p_strike.sh b_onnx --target-width 2.38   # 无头单�
 标定方法：`sim/eval_detector_frames.py` 在落盘原始帧上对比召回/框宽。
 
 GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index **1** = `GPU-40c96051-...`），
-绝不上 nvidia-smi index 0（别人的卡）。细节与两个坑见
-[检测后端实测报告](docs/interception/2026-10-05-onnx-nvidia0-gpu-test.md)。
+绝不上 nvidia-smi index 0（其他用户的卡）。细节与两个坑见本地文档
+`docs/interception/2026-10-05-onnx-nvidia0-gpu-test.md`（未纳入版本控制）。
 
 ---
 
@@ -331,11 +330,11 @@ GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index
 
 | 入口 | 内容 |
 |------|------|
-| [`docs/README.md`](docs/README.md) | **文档总索引**：按时间线的主线文档 + 归档 + 写文档约定 |
-| [`docs/architecture.md`](docs/architecture.md) | **代码地图**：两条链路分层、模块职责、依赖方向、改哪里跑什么 |
 | [`sim/README.md`](sim/README.md) | 仿真工作区地图：入口脚本 / 库模块 / 分析工具 / 世界 / 踩坑清单 |
 | [`modeling/README.md`](modeling/README.md) | 理论模型与整定工具链 |
-| [`sim/results/`](sim/results/) | 全部验证数据与两类分析报告（报告跟数据放一起） |
+| `guidance/` `perception/` `tests/` `sim/tools/` 下的 README | 各层职责与入口 |
+| `docs/`（本地，未纳入版本控制） | 设计与进展文档、架构总览、索引、讲稿 PDF/tex 与三场景录像 |
+| `sim/results/` | 验证数据（`.csv`/`.png`）；复盘报告 `*.md` 为本地文档 |
 
 代码规范：Python 以 `python3 -m flake8 --select=E9,F63,F7,F82,F401,F841,E722,W605` 零告警为准，
 `python3 -m pytest -q` 全绿（当前 153 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
