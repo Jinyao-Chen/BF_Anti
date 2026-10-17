@@ -68,20 +68,103 @@ def test_same_input_gives_identical_output():
 
 
 def test_no_integrator_or_derivative_state_attributes():
-    """P-only 契约（2026-09-29 按用户要求放宽一处）。
+    """P-only 契约（已按用户要求两次放宽，均限于**默认惰性**的积分状态）。
 
-    用户明确要求在竖向加"一小点 Ki"，因此允许存在 **默认惰性** 的竖向积分状态；
-    其余 I/D 状态仍禁止，且 ki_z=0（默认）时积分不得参与任何输出。
+    * 2026-09-29：允许竖向"一小点 Ki"（ki_z）；
+    * 2026-10-14：允许图像误差积分 ki_pitch / ki_roll（用户要求加 I 控制）。
+
+    契约本身不变，只是更严格地表述为：
+      ① 所有积分增益默认必须为 0；
+      ② 积分状态只允许上述三项及其限幅/泄放参数；
+      ③ 默认参数下的输出必须与纯 P 逐位一致（见下一个测试）。
+    任何**微分**状态、或默认非零的积分增益，仍然禁止。
     """
     g = make_guidance()
     assert g.ki_z == 0.0, "默认必须是纯 P：竖向积分增益为 0"
+    assert g.ki_pitch == 0.0, "默认必须是纯 P：俯仰积分增益为 0"
+    assert g.ki_roll == 0.0, "默认必须是纯 P：滚转积分增益为 0"
     names = list(vars(g).keys()) + [n for n in dir(g) if not n.startswith("__")]
-    allowed = {"ki_z", "_z_int", "ki_z_limit_m"}
+    allowed = {"ki_z", "_z_int", "ki_z_limit_m",
+               "ki_pitch", "ki_pitch_limit_deg", "_ei_pitch_deg",
+               "ki_roll", "ki_roll_limit_deg", "_ei_roll_deg",
+               "ki_e_range_m", "ki_e_leak_s"}
     for name in names:
         low = name.lower()
         if name in allowed:
             continue
         assert not any(h in low for h in _FORBIDDEN_STATE_HINTS), f"疑似 I/D 状态: {name}"
+
+
+def test_image_integrals_are_inert_by_default():
+    """ki_pitch=ki_roll=0 时，积分状态恒为 0 且不参与任何输出。"""
+    g0 = make_guidance()
+    g1 = make_guidance()
+    for k in range(40):
+        u = 320.0 + 45.0 * ((k % 7) - 3)
+        v = 240.0 + 30.0 * ((k % 5) - 2)
+        bb = bbox_around(u, v, 30.0)
+        rpy = (0.0, -30.0, 3.0)
+        c0 = g0.update(bb, OWN_POS, np.zeros(3), rpy, k * 0.05, 0.05)
+        c1 = g1.update(bb, OWN_POS, np.zeros(3), rpy, k * 0.05, 0.05)
+        assert c1.roll_cmd_deg == c0.roll_cmd_deg
+        assert c1.pitch_cmd_deg == c0.pitch_cmd_deg
+        assert c1.yaw_rate_dps == c0.yaw_rate_dps
+        assert c1.throttle_pwm == c0.throttle_pwm
+    assert g1._ei_pitch_deg == 0.0
+    assert g1._ei_roll_deg == 0.0
+
+
+def test_pitch_integral_builds_up_and_is_limited():
+    """ki_pitch>0 且误差持续为正时：积分状态单增、俯仰指令持续压低、并在限幅处截止。
+
+    这正是加 I 的目的：纯 P 必须"目标留在画面中心之外"才能产生指令，稳态图像误差
+    无法收敛到 0；积分把这个偏置搬进内部状态，稳态误差才可以为零。
+    """
+    bb = bbox_around(320.0, 300.0, 30.0)          # 目标在主点下方 → e_v > 0
+    rpy = (0.0, -30.0, 0.0)
+    g = make_guidance(ki_pitch=20.0, ki_pitch_limit_deg=4.0)
+    first = g.update(bb, OWN_POS, np.zeros(3), rpy, 0.0, 0.05).pitch_cmd_deg
+    last = first
+    for k in range(1, 60):
+        c = g.update(bb, OWN_POS, np.zeros(3), rpy, k * 0.05, 0.05)
+        assert g._ei_pitch_deg >= 0.0             # 与误差同号累积（指令域取负号注入）
+        assert abs(g._ei_pitch_deg) <= 4.0 + 1e-9  # 指令域限幅 = 抗饱和
+        assert c.pitch_cmd_deg <= last + 1e-9      # 单调压低
+        last = c.pitch_cmd_deg
+    assert g._ei_pitch_deg == pytest.approx(4.0, abs=1e-6)   # 已饱和
+    assert last < first                                       # 比纯 P 更低
+
+
+def test_roll_integral_sign_and_limit():
+    """ki_roll>0 且目标持续偏右：滚转指令在 P 项之外继续同号累积并限幅。"""
+    bb = bbox_around(400.0, 240.0, 30.0)          # 目标在中心右侧 → e_u > 0
+    rpy = (0.0, -30.0, 0.0)
+    g = make_guidance(ki_roll=30.0, ki_roll_limit_deg=5.0)
+    first = g.update(bb, OWN_POS, np.zeros(3), rpy, 0.0, 0.05).roll_cmd_deg
+    for k in range(1, 80):
+        c = g.update(bb, OWN_POS, np.zeros(3), rpy, k * 0.05, 0.05)
+        assert g._ei_roll_deg >= 0.0
+        assert abs(g._ei_roll_deg) <= 5.0 + 1e-9
+    assert g._ei_roll_deg == pytest.approx(5.0, abs=1e-6)
+    assert c.roll_cmd_deg > first
+
+
+def test_integral_leaks_when_out_of_range():
+    """测距小于 ki_e_range_m 时不积分并按泄放时间常数回零（终端防旧误差）。"""
+    bb = bbox_around(320.0, 300.0, 30.0)
+    rpy = (0.0, -30.0, 0.0)
+    g = make_guidance(ki_pitch=20.0, ki_pitch_limit_deg=4.0, ki_e_range_m=0.0)
+    for k in range(20):
+        g.update(bb, OWN_POS, np.zeros(3), rpy, k * 0.05, 0.05)
+    hot = g._ei_pitch_deg
+    assert hot > 0.0
+    g.ki_e_range_m = 1e9                          # 强制"在积分区外"
+    for k in range(20, 60):
+        g.update(bb, OWN_POS, np.zeros(3), rpy, k * 0.05, 0.05)
+    assert 0.0 < g._ei_pitch_deg < hot            # 只泄放、不反号
+    # 泄放时间常数 1.5 s，经过 2.0 s 应衰减到 (1.5/1.55)^40 ≈ 0.27 倍 —— 只做慢衰减，
+    # 不做瞬时清零，避免"刚出积分区就把指令抽走"造成姿态跳变。
+    assert g._ei_pitch_deg < 0.35 * hot
 
 
 def test_vertical_integral_is_inert_by_default():

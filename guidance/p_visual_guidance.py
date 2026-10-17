@@ -188,6 +188,14 @@ class PVisualGuidance:
         vz_lpf_tau_s: float = 0.0,
         ki_z: float = 0.0,
         ki_z_limit_m: float = 4.0,
+        # 图像误差积分（用户要求加入）。原设计契约为"纯 P"，故默认 0；
+        # 状态直接存在**指令域（度）**，限幅即抗饱和。量纲：度 / (归一化误差 · 秒)。
+        ki_pitch: float = 0.0,
+        ki_pitch_limit_deg: float = 10.0,
+        ki_roll: float = 0.0,
+        ki_roll_limit_deg: float = 12.0,
+        ki_e_range_m: float = 0.0,
+        ki_e_leak_s: float = 1.5,
         angle_limit_deg: float = 60.0,
         yaw_full_rate_dps: float = 300.0,
     ) -> None:
@@ -319,6 +327,18 @@ class PVisualGuidance:
         self.ki_z = float(ki_z)
         self.ki_z_limit_m = float(ki_z_limit_m)
         self._z_int = 0.0
+        # 图像误差积分：直接以度为状态，限幅在指令域做（最简抗饱和）。
+        self.ki_pitch = float(ki_pitch)
+        self.ki_pitch_limit_deg = float(ki_pitch_limit_deg)
+        self.ki_roll = float(ki_roll)
+        self.ki_roll_limit_deg = float(ki_roll_limit_deg)
+        # 只在测距不小于 ki_e_range_m 时积分：终端 bbox 撑满画面，框中心不再代表
+        # 目标方位，再积分只会把中段的旧误差带进终端；不满足条件时按 ki_e_leak_s
+        # 时间常数泄放（既防饱和也防丢检后残留）。
+        self.ki_e_range_m = float(ki_e_range_m)
+        self.ki_e_leak_s = float(ki_e_leak_s)
+        self._ei_pitch_deg = 0.0
+        self._ei_roll_deg = 0.0
         # 垂直通道"命中一致"标度：终端脱靶 96% 是垂直的 —— 最近点时水平已 0.60 m、
         # 垂直还差 2.16 m 且在上升(1.41 m/s)，即"没到"而不是"打偏"。
         # 按时撞上要求 v_up = (z_target - z_own)/τ（τ=剩余飞行时间）。
@@ -541,8 +561,31 @@ class PVisualGuidance:
         e_u_cmd = _soft(e_u, w_soft)
         e_v_cmd = _soft(e_v, w_soft)
 
+        # 图像误差积分（可选；两个 ki 都为 0 时不改变任何行为，与已验证的纯 P 一致）。
+        # 物理作用：纯 P 下"目标必须留在画面中心之外"才能产生姿态指令，稳态图像误差
+        # 不可能收敛到 0；积分项把这个"必须的偏置"搬进内部状态，稳态误差可以做到零
+        # 而指令不被削弱。代价是相位滞后，故只在有真实检测帧、且测距不小于
+        # ki_e_range_m 时积分，其余时间按 ki_e_leak_s 泄放。
+        if self.ki_pitch != 0.0 or self.ki_roll != 0.0:
+            can_int = bool(fresh) and (
+                self.ki_e_range_m <= 0.0
+                or (np.isfinite(range_est) and range_est >= self.ki_e_range_m))
+            if can_int:
+                if self.ki_pitch != 0.0:
+                    self._ei_pitch_deg = float(np.clip(
+                        self._ei_pitch_deg + self.ki_pitch * e_v_cmd * float(dt),
+                        -self.ki_pitch_limit_deg, self.ki_pitch_limit_deg))
+                if self.ki_roll != 0.0:
+                    self._ei_roll_deg = float(np.clip(
+                        self._ei_roll_deg + self.ki_roll * e_u_cmd * float(dt),
+                        -self.ki_roll_limit_deg, self.ki_roll_limit_deg))
+            else:
+                leak = float(dt) / (self.ki_e_leak_s + float(dt))
+                self._ei_pitch_deg -= leak * self._ei_pitch_deg
+                self._ei_roll_deg -= leak * self._ei_roll_deg
+
         yaw_rate = self.kp_yaw * e_u_cmd
-        roll_cmd = self.kp_roll * e_u_cmd
+        roll_cmd = self.kp_roll * e_u_cmd + self._ei_roll_deg
 
         # 速度矢量对齐（仍是比例项）：速度方位与视线方位的夹角 → 滚转。
         # 速度矢量偏右 → 左滚把它拉回来，使航迹对准目标而不是"机头对准"。
@@ -578,7 +621,7 @@ class PVisualGuidance:
         u_rate_used = u_rate_px_s_raw
 
         pitch_bias = el_los - self.camera_tilt_deg
-        pitch_cmd = pitch_bias - self.kp_pitch * e_v_cmd
+        pitch_cmd = pitch_bias - self.kp_pitch * e_v_cmd - self._ei_pitch_deg
         # 抬头爬升段：高度差还大时保持抬头（推力朝上、全力拔高），不做低头
         if self.pop_up_pitch_deg != 0.0 and (z_target_est - z_own) > self.pop_up_z_m:
             pitch_cmd = self.pop_up_pitch_deg
@@ -851,6 +894,8 @@ class PVisualGuidance:
         self._last_t = None
         self._meas = None
         self._hit_count = 0
+        self._ei_pitch_deg = 0.0
+        self._ei_roll_deg = 0.0
 
 
 # ---------------------------------------------------------------------- #

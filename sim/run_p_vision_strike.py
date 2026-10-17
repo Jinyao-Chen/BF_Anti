@@ -418,6 +418,12 @@ def build_guidance(args, image_size) -> PVisualGuidance:
         vz_lpf_tau_s=args.vz_lpf,
         ki_z=args.ki_z,
         ki_z_limit_m=args.ki_z_limit,
+        ki_pitch=args.ki_pitch,
+        ki_pitch_limit_deg=args.ki_pitch_limit,
+        ki_roll=args.ki_roll,
+        ki_roll_limit_deg=args.ki_roll_limit,
+        ki_e_range_m=args.ki_e_range,
+        ki_e_leak_s=args.ki_e_leak,
         pop_up_pitch_deg=args.pop_up_pitch,
         pop_up_z_m=args.pop_up_z,
         angle_limit_deg=args.angle_limit,
@@ -521,6 +527,20 @@ def main() -> int:
                         help="竖向设定值 LPF 时间常数(s)，0=不滤波")
     # 用户要求加"一小点 Ki"：0.05 使俯仰 std 6.4°->4.6°、油门峰峰 397->349，
     # 脱靶不变（0.586->0.609 m）。原纯 P 契约据此放宽为"默认惰性、显式启用"。
+    parser.add_argument("--ki-pitch", type=float, default=0.0,
+                        help="图像垂直误差积分增益（度/(归一化误差·秒)）；"
+                             "0=纯 P（默认）。积分状态限幅见 --ki-pitch-limit")
+    parser.add_argument("--ki-pitch-limit", type=float, default=10.0,
+                        help="俯仰积分项的指令域限幅（度），兼作抗饱和")
+    parser.add_argument("--ki-roll", type=float, default=0.0,
+                        help="图像水平误差积分增益（度/(归一化误差·秒)）；0=纯 P（默认）")
+    parser.add_argument("--ki-roll-limit", type=float, default=12.0,
+                        help="滚转积分项的指令域限幅（度）")
+    parser.add_argument("--ki-e-range", type=float, default=0.0,
+                        help="只有测距不小于该值时积分（0=全程）；终端 bbox 撑满画面时"
+                             "框中心不再代表目标方位，建议给 6~10")
+    parser.add_argument("--ki-e-leak", type=float, default=1.5,
+                        help="不积分时的泄放时间常数（秒）")
     parser.add_argument("--ki-z", type=float, default=0.05,
                         help="竖向小积分增益(1/s^2)；原设计契约是纯 P，默认 0")
     parser.add_argument("--ki-z-limit", type=float, default=4.0)
@@ -597,6 +617,10 @@ def main() -> int:
     parser.add_argument("--yolo-host", default=os.environ.get("YOLO_HOST", "127.0.0.1"),
                         help="YOLO 服务地址；默认取 $YOLO_HOST，否则本机 127.0.0.1（远程 GPU 先建 SSH 隧道）")
     parser.add_argument("--yolo-port", type=int, default=9300)
+    parser.add_argument("--yolo-timeout", type=float, default=0.5,
+                        help="单次检测的客户端超时(s)。GPU 服务 0.5 足够；本机 CPU"
+                             "推理（均值约 0.1 s、长尾更长）建议 2.0，否则超时被丢弃"
+                             "会表现为「检测恒为 0」")
     parser.add_argument("--async-yolo", type=int, default=1,
                         help="1=检测放后台线程（控制回路不被推理阻塞）")
     parser.add_argument("--min-conf", type=float, default=0.10,
@@ -663,7 +687,7 @@ def main() -> int:
     yolo = None
     if not args.synthetic:
         from run_visual_strike_yolo import RemoteYolo, choose_bbox
-        yolo = RemoteYolo(args.yolo_host, args.yolo_port)
+        yolo = RemoteYolo(args.yolo_host, args.yolo_port, timeout=args.yolo_timeout)
 
     viewer = None
     writer = None
