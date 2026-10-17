@@ -68,15 +68,21 @@ fi
 
 say ""
 say "== 3. 内核驱动 drm-rp1-vec =="
-if dmesg 2>/dev/null | grep -qiE 'drm-rp1-vec'; then
-  dmesg 2>/dev/null | grep -iE 'rp1vec|drm-rp1-vec' | tail -4 | sed 's/^/       /'
-  if dmesg 2>/dev/null | grep -q 'rp1vec_pipe_enable'; then
-    ok "VEC 已在输出（出现 rp1vec_pipe_enable）"
+# dmesg 是环形缓冲，Hailo/PCIe 等日志会把它冲掉；不要再拿 dmesg 当判据。
+if [ -d /sys/module/drm_rp1_vec ] || [ -d /sys/module/drm-rp1-vec ]; then
+  ok "drm-rp1-vec 驱动已加载"
+  if command -v modetest >/dev/null 2>&1; then
+    if modetest -M drm-rp1-vec -p >/dev/null 2>&1; then
+      ok "modetest 能打开 drm-rp1-vec 并读到当前时序"
+    else
+      warn "驱动在，但 modetest 打不开 drm-rp1-vec"
+    fi
   else
-    warn "驱动已加载但没看到 rp1vec_pipe_enable（可能未设模式）"
+    info "没有 modetest（apt install libdrm-tests）；跳过时序探测"
   fi
+  info "dmesg 环缓冲会回卷，本脚本不再用 dmesg 作为判据"
 else
-  bad "dmesg 里没有 drm-rp1-vec：composite 开关没生效或还没重启"
+  bad "没有 drm_rp1_vec 模块：composite 开关没生效或还没重启"
 fi
 
 say ""

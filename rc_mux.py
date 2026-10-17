@@ -8,6 +8,9 @@
   5. 进入替换 0.5s 斜坡; 退出立即
   6. 无 CRSF -> BENCH 模式 (键盘切换, base_throttle)
 AUX1-4 (含 ARM) 永远透传飞手.
+FC 模式 (channel_source): AUX 只回放飞手缓存值; RC 缓存过期 (>rc_stale_timeout)
+或不足 8 通道时不发任何 MSP RC 帧, 交给飞控原生 failsafe, 绝不猜 AUX.
+BENCH 模式是唯一会主动置 AUX1=2000 的路径 (仅拆桨台架).
 """
 import time
 import threading
@@ -34,7 +37,7 @@ class RCMux:
 
     def __init__(self, msp, crsf=None, switch_channel=None,
                  base_throttle=1100, crsf_timeout=0.5, cmd_timeout=0.5,
-                 rate_hz=50, channel_source=None):
+                 rate_hz=50, channel_source=None, rc_stale_timeout=0.5):
         self.msp = msp
         self.crsf = crsf
         self.switch_channel = switch_channel
@@ -43,6 +46,10 @@ class RCMux:
         self.cmd_timeout = cmd_timeout
         self.rate_hz = rate_hz
         self._channel_source = channel_source  # ()->(channels, age) for FC mode
+        # FC mode: when the MSP_RC cache is older than this, send NO MSP RC
+        # frame at all and let the FC's native failsafe take over.  Never
+        # replay stale pilot values or guess AUX.
+        self.rc_stale_timeout = max(0.0, float(rc_stale_timeout))
         self.on_engage = None
         self.on_disengage = None
 
@@ -114,16 +121,18 @@ class RCMux:
     # ── FC 模式: 接收机在飞控上, X5 通过 MSP_GET_RC 读通道 ─────────────
 
     def _tick_fc_mode(self, now):
-        """FC 架构: 开关/接管检测走 MSP RC 缓存, AUX 透传飞手.
-        RPYT 在 AUTO 时用追踪值, 否则发中立值 (FC 靠 BOXMSPOVERRIDE 切换).
+        """FC 架构: 开关/接管检测走 MSP RC 缓存, AUX 永远只透传飞手.
+
+        RPYT 在 AUTO 时用追踪值, 否则用飞手值. AUX 从不写固定值 (旧代码在
+        这里硬编码 AUX3=2000, 会让伴飞逻辑自己去拨 BOXMSPOVERRIDE).
+        RC 缓存过期时不发任何 MSP RC 帧: 让飞控原生 failsafe 接管.
         """
         rc_data, rc_age = self._channel_source()
-        if rc_data is None or rc_age > 2.0:
-            # RC 缓存过期 (>2s) → 不更新 AUX, 仅维持 RPYT
-            self._send_fc_rpyt(now)
+        if rc_data is None or rc_age > self.rc_stale_timeout or len(rc_data) < 8:
+            self._fc_stale()
             return
 
-        ch = rc_data[:16] if len(rc_data) >= 8 else (rc_data + [1500] * (16 - len(rc_data)))
+        ch = list(rc_data[:16])
         self.mode = "PASSTHROUGH"  # FC 架构无 SILENT, failsafe 由飞控原生 CRSF 保证
 
         self._update_switch(ch)
@@ -137,21 +146,27 @@ class RCMux:
             # 透传飞手 RPYT — AUX3 切高位时 FC 立刻用 MSP 值, 必须无缝衔接
             rpyt = (ch[0], ch[1], ch[2], ch[3])
 
-        aux = ch[4:8]
-        self.msp.set_rc(rpyt[0], rpyt[1], rpyt[2], rpyt[3],
-                        aux[0], aux[1], aux[2], aux[3])
-
-    def _send_fc_rpyt(self, now):
-        """RC 缓存过期时仅发送 RPYT (不发 AUX, 避免误触 ARM)."""
-        if self._auto:
-            cmd = self._cmd
-            if cmd is not None and (now - cmd.t) <= self.cmd_timeout:
-                self.msp.set_rc(cmd.roll, cmd.pitch, cmd.throttle, cmd.yaw,
-                                1500, 1500, 2000, 1500)
-            else:
-                self.msp.set_rc(1500, 1500, 1000, 1500, 1500, 1500, 1500, 1500)
+        # AUX1..4 (16 通道时还包括 AUX5..12) 只透传飞手缓存值, 绝不改写成
+        # ARM / ANGLE / BOXMSPOVERRIDE / engage 的指令.
+        if hasattr(self.msp, "send_rc_16"):
+            channels = list(rpyt) + ch[4:16]
+            if len(channels) < 16:
+                channels.extend([1500] * (16 - len(channels)))
+            self.msp.send_rc_16(channels)
         else:
-            self.msp.set_rc(1500, 1500, 1000, 1500, 1500, 1500, 1500, 1500)
+            aux = ch[4:8]
+            self.msp.set_rc(rpyt[0], rpyt[1], rpyt[2], rpyt[3],
+                            aux[0], aux[1], aux[2], aux[3])
+
+    def _fc_stale(self):
+        """RC 缓存过期: 不发 MSP RC 帧, 让 FC failsafe; 退出 AUTO 并上锁."""
+        if self.mode != "FC_STALE":
+            self.mode = "FC_STALE"
+            self._was_substituting = False
+            self._switch_prev = False
+            self._switch_seen_low = False
+            if self._auto:
+                self._exit_auto()
 
     def _update_switch(self, ch):
         if self.switch_channel is None or len(ch) <= self.switch_channel:

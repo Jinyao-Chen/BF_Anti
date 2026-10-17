@@ -119,6 +119,7 @@ class PVisualGuidance:
     def __init__(
         self,
         camera_tilt_deg: float = 44.0,
+        camera_yaw_offset_deg: float = 0.0,
         image_size: tuple[int, int] = (640, 480),
         hfov_deg: float = 68.75,
         kp_yaw: float = 55.0,
@@ -200,6 +201,7 @@ class PVisualGuidance:
         yaw_full_rate_dps: float = 300.0,
     ) -> None:
         self.camera_tilt_deg = float(camera_tilt_deg)
+        self.camera_yaw_offset_deg = float(camera_yaw_offset_deg)
         self.intrinsics = CameraIntrinsics.from_fov(*image_size, hfov_deg=hfov_deg)
         self.extrinsics = CameraExtrinsics(tilt_deg=camera_tilt_deg)
 
@@ -429,7 +431,8 @@ class PVisualGuidance:
         # 量测几何：像素 → 地球系视线 → (方位, 仰角)
         los_e = pixel_to_earth_los(
             (u_px, v_px), self.intrinsics, self.extrinsics,
-            yaw_deg=yaw_own, pitch_deg=pitch_own, roll_deg=roll_own,
+            yaw_deg=yaw_own + self.camera_yaw_offset_deg,
+            pitch_deg=pitch_own, roll_deg=roll_own,
         )
         az_los, el_los = earth_los_to_az_el(los_e)
         if fresh:
@@ -896,6 +899,10 @@ class PVisualGuidance:
         self._hit_count = 0
         self._ei_pitch_deg = 0.0
         self._ei_roll_deg = 0.0
+
+    def reset_tracking(self) -> None:
+        """Explicit alias used by the onboard controller on re-engage."""
+        self.reset()
 
 
 # ---------------------------------------------------------------------- #

@@ -1,0 +1,4 @@
+# BF_Anti YOLOv8n 1-class drone model script (raw-head HEF path).
+# The graph in model/v1_yolov8_mAP50_0.879.onnx expects float RGB 0..1, while
+# HailoRT feeds uint8 RGB. normalization(mean, std) applies (x - mean) / std.
+normalization1 = normalization([0.0, 0.0, 0.0], [255.0, 255.0, 255.0])

@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-10-17T23:12:14+08:00",
+  "bf_anti": {
+    "repo": "/home/chen-jinyao/BF_Anti",
+    "branch": "sim2real/pi5-2026-10",
+    "commit": "698f899",
+    "tag": "baseline-2026-10-17",
+    "pytest": "346 passed"
+  },
+  "firmware": {
+    "repo": "/home/chen-jinyao/betaflight",
+    "branch": "sim2real/2026-10-17",
+    "commit": "5ce40b7691",
+    "tag": "sim2real-2026-10-17",
+    "base": "release260904",
+    "base_commit": "44482a4c7f59507b849c8a475d9b92b9af78daec",
+    "worktree": "/tmp/bf_sim2real",
+    "release260904_untouched": true
+  },
+  "sitl": {
+    "target": "SITL_GAZEBO",
+    "build_command": "make CONFIG=SITL_GAZEBO -j8",
+    "elf": "/home/chen-jinyao/betaflight/obj/main/betaflight_SITL_SITL_GAZEBO.elf",
+    "elf_sha256": "45c7d4f2cf4bde6129969c1f95f7e8800d527f161adba4c21a3ba7b42dd79795",
+    "elf_mtime": "2026-09-29T10:35:51+08:00",
+    "build_status": "up-to-date (no source newer than ELF at build check)"
+  },
+  "hardware": {
+    "fc_board": "UNKNOWN - read MSP_BOARD_INFO when connected",
+    "target": "TBD - do not flash until identifier matches",
+    "camera": "NOT CONNECTED",
+    "vtx_goggles": "PAL analog 5.8 GHz (J7 verified by user)",
+    "hailo": "Hailo-8L 13 TOPS, HailoRT 4.23.0, firmware 4.23.0"
+  },
+  "gates": {
+    "phase0": "PASS",
+    "phase1_platform": "PASS except camera absent",
+    "phase2_hef": "BLOCKED - DFC 3.33.0 not installed",
+    "phase4_firmware_flash": "BLOCKED - FC board/target unknown",
+    "phase4_motor_ab": "BLOCKED - FC not connected",
+    "phase6_flight": "BLOCKED - hardware/site not ready"
+  }
+}

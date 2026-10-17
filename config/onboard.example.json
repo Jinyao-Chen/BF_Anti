@@ -1,0 +1,91 @@
+{
+  "profile": "real_conservative",
+  "log_dir": "/home/pi5/bf_anti_logs",
+  "fc": {
+    "port": "/dev/ttyACM0",
+    "baud": 115200,
+    "tcp_host": "",
+    "tcp_port": 5761,
+    "telemetry_hz": 25.0,
+    "rc_hz": 50.0,
+    "reply_timeout_s": 0.15,
+    "link_timeout_s": 0.6,
+    "aux_arm": 4,
+    "aux_angle": 5,
+    "aux_override": 6,
+    "aux_engage": 7,
+    "require_override": true,
+    "require_engage": true
+  },
+  "camera": {
+    "device": "/dev/video0",
+    "width": 1280,
+    "height": 720,
+    "fps": 30.0,
+    "fourcc": "MJPG",
+    "hfov_deg": 70.0,
+    "vfov_deg": null,
+    "tilt_deg": 44.0,
+    "yaw_offset_deg": 0.0,
+    "warmup_s": 1.0
+  },
+  "detector": {
+    "backend": "hailo",
+    "hef": "model/yolov8n_drone_h8l.hef",
+    "input_width": 640,
+    "input_height": 640,
+    "conf_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "max_detections": 10,
+    "class_names": ["drone"],
+    "async_infer": true,
+    "confirm_frames": 2,
+    "max_coast_frames": 4,
+    "gate_px": 90.0,
+    "gate_gain": 3.0,
+    "replay_path": "",
+    "replay_loop": true
+  },
+  "guidance": {
+    "params": {}
+  },
+  "safety": {
+    "max_rc_age_s": 0.30,
+    "max_att_age_s": 0.25,
+    "max_alt_age_s": 0.35,
+    "max_status_age_s": 0.60,
+    "max_loop_dt_s": 0.10,
+    "max_det_age_s": 0.40,
+    "min_altitude_m": 2.0,
+    "max_altitude_m": 60.0,
+    "max_range_m": 80.0,
+    "min_battery_v": 0.0,
+    "target_confirm_s": 0.10,
+    "target_lost_s": 0.40,
+    "lost_reset_s": 1.5,
+    "fault_latch": true
+  },
+  "video": {
+    "enabled": true,
+    "fb": "/dev/fb0",
+    "width": 720,
+    "height": 576,
+    "fps": 25.0,
+    "osd": true,
+    "letterbox": true,
+    "font_path": "",
+    "draw_box": true
+  },
+  "control": {
+    "rate_hz": 50.0,
+    "angle_limit_deg": 60.0,
+    "yaw_full_rate_dps": 300.0,
+    "rc_rate_limit": 60,
+    "roll_sign": 1.0,
+    "pitch_sign": 1.0,
+    "yaw_sign": 1.0,
+    "throttle_min": 1000,
+    "throttle_max": 2000,
+    "hover_throttle": 1670
+  }
+}

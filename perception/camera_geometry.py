@@ -70,9 +70,14 @@ class CameraIntrinsics:
 
 @dataclass(frozen=True)
 class CameraExtrinsics:
-    """相机相对机体的安装角。"""
+    """相机相对机体的安装角。
+
+    yaw_offset_deg 是相机光轴相对机体 +X 的水平偏角，正值 = 从机尾看
+    光轴向右偏（与罗盘/航向角同向）。tilt_deg 是上仰角。
+    """
 
     tilt_deg: float = 44.0
+    yaw_offset_deg: float = 0.0
 
     def rotation_body_from_camera(self) -> np.ndarray:
         """返回 3x3 矩阵 R_bc，使 v_body = R_bc @ v_camera。
@@ -86,7 +91,14 @@ class CameraExtrinsics:
         x_c_b = np.array([0.0, -1.0, 0.0])
         z_c_b = np.array([c, 0.0, s])
         y_c_b = np.cross(z_c_b, x_c_b)
-        return np.column_stack([x_c_b, y_c_b, z_c_b])
+        base = np.column_stack([x_c_b, y_c_b, z_c_b])
+        if self.yaw_offset_deg == 0.0:
+            return base
+        # 光轴右偏 = 绕机体 +Z（上）顺时针 = 转 -yaw_offset。
+        yaw = np.deg2rad(-float(self.yaw_offset_deg))
+        cy, sy = np.cos(yaw), np.sin(yaw)
+        rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
+        return rz @ base
 
 
 def rotation_earth_from_body(
