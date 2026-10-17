@@ -22,6 +22,17 @@
 
 ## Pi5 机载（sim2real）
 
+### 目标硬件
+
+| 组件 | 当前选择 | 状态 |
+|---|---|---|
+| 机载电脑 | Raspberry Pi 5 Model B 4GB | 已实测 |
+| NPU | AI HAT+ Hailo-8L 13 TOPS (HAILO8L) | 已实测，HailoRT 4.23.0 |
+| 相机 | USB UVC 1280x720 MJPG | **未接**；型号/FOV 待定 |
+| 飞控 | Betaflight, 板卡待识别 | **未接**；target 不能猜 |
+| 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；目视未验 |
+| 模型 | YOLOv8n 1-class drone -> Hailo HEF | **DFC 3.33.0 未装**，HEF 未编译 |
+
 ### 数据流
 
 ~~~text
