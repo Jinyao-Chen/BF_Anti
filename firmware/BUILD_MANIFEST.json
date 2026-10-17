@@ -21,9 +21,9 @@
     "target": "SITL_GAZEBO",
     "build_command": "make CONFIG=SITL_GAZEBO -j8",
     "elf": "/home/chen-jinyao/betaflight/obj/main/betaflight_SITL_SITL_GAZEBO.elf",
-    "elf_sha256": "45c7d4f2cf4bde6129969c1f95f7e8800d527f161adba4c21a3ba7b42dd79795",
-    "elf_mtime": "2026-09-29T10:35:51+08:00",
-    "build_status": "up-to-date (no source newer than ELF at build check)"
+    "elf_sha256": "90306d2b81bfff90676289ad4b705fcdaa1448a8ab502ceae6d6b74211f364a2",
+    "elf_mtime": "2026-10-17T23:35:42+08:00",
+    "build_status": "forced clean rebuild (make -B) succeeded; text=405863 data=23790 bss=79504"
   },
   "hardware": {
     "fc_board": "UNKNOWN - read MSP_BOARD_INFO when connected",
