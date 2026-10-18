@@ -14,6 +14,9 @@
 # the exact command it would have run.
 set -euo pipefail
 
+# Use the DFC virtualenv explicitly, e.g.
+#   PYTHON=$HOME/hailo_local/dfc_venv/bin/python tools/hailo/build_hef.sh ...
+PYTHON="${PYTHON:-python3}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PIPELINE=dfc
 ONNX="$REPO_ROOT/model/v1_yolov8_mAP50_0.879.onnx"
@@ -97,7 +100,7 @@ echo "  hw_arch  : $HW_ARCH"
 echo "  out      : $OUT"
 
 if [ "$SKIP_CHECK" -eq 0 ]; then
-  if ! python3 "$REPO_ROOT/tools/hailo/check_env.py" --role build; then
+  if ! "$PYTHON" "$REPO_ROOT/tools/hailo/check_env.py" --role build; then
     echo "" >&2
     echo "BLOCKED: build environment check failed (see BLOCKED lines above)." >&2
     echo "Install Hailo DFC 3.33.0 and Hailo Model Zoo v2.17, or pass --skip-check." >&2
@@ -112,12 +115,12 @@ if [ "$PIPELINE" = "dfc" ]; then
     exit 2
   fi
   echo "DFC command:"
-  echo "  python3 tools/hailo/compile_onnx.py --onnx $ONNX --calib $CALIB --out $OUT --name $NETWORK --hw-arch $HW_ARCH --alls $ALLS"
+  echo "  $PYTHON tools/hailo/compile_onnx.py --onnx $ONNX --calib $CALIB --out $OUT --name $NETWORK --hw-arch $HW_ARCH --alls $ALLS"
   if [ "$DRY_RUN" -eq 1 ]; then
-    python3 "$REPO_ROOT/tools/hailo/compile_onnx.py" --onnx "$ONNX" --calib "$CALIB" --out "$OUT" --name "$NETWORK" --hw-arch "$HW_ARCH" --alls "$ALLS" --dry-run || true
+    "$PYTHON" "$REPO_ROOT/tools/hailo/compile_onnx.py" --onnx "$ONNX" --calib "$CALIB" --out "$OUT" --name "$NETWORK" --hw-arch "$HW_ARCH" --alls "$ALLS" --dry-run || true
     exit 0
   fi
-  python3 "$REPO_ROOT/tools/hailo/compile_onnx.py" --onnx "$ONNX" --calib "$CALIB" --out "$OUT" --name "$NETWORK" --hw-arch "$HW_ARCH" --alls "$ALLS"
+  "$PYTHON" "$REPO_ROOT/tools/hailo/compile_onnx.py" --onnx "$ONNX" --calib "$CALIB" --out "$OUT" --name "$NETWORK" --hw-arch "$HW_ARCH" --alls "$ALLS"
 else
   if [ -z "$HMZ_DIR" ]; then
     echo "error: --hmz-dir (or HAILO_MODEL_ZOO) is required for --pipeline hmz" >&2
