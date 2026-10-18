@@ -69,12 +69,12 @@ PY
 
 ensure_yolo() {
     if [ "${YOLO_DIRECT}" = "1" ]; then
-        # 直连模式：检测服务已经在 YOLO_HOST 上跑（例如板上 python3 sim/yolo_server_board.py）
+        # 直连模式：检测服务已经在 YOLO_HOST 上跑（X5 旧服务见 legacy/rdk_x5_pico/scripts/yolo_server_board.py）
         if probe_yolo "${YOLO_HOST}"; then
             echo "[live] YOLO 直连可用 (${YOLO_HOST}:${YOLO_PORT})"; return 0
         fi
         echo "[live] WARNING: 直连 ${YOLO_HOST}:${YOLO_PORT} 不可用。"
-        echo "        先在板上起服务: python3 sim/yolo_server_board.py --host 0.0.0.0 --port ${YOLO_PORT}"
+        echo "        先在板上起服务: python3 legacy/rdk_x5_pico/scripts/yolo_server_board.py --host 0.0.0.0 --port ${YOLO_PORT}"
         return 1
     fi
     if probe_yolo; then echo "[live] YOLO 服务可用 (127.0.0.1:${YOLO_PORT})"; return 0; fi

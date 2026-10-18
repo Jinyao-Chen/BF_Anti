@@ -914,7 +914,7 @@ class PVisualGuidance:
 #   ch3=1700 → MSP yaw +9.5°（顺时针）⟹ yaw 通道高 = 右偏航率
 #   ch3=1500-Δ（左偏航命令）→ Gazebo 真值 yaw 反而增加（右转，实测 +6 dps 对应
 #   -41 dps 命令）⟹ yaw 通道**取反**。这与 SITL yaw 陀螺极性
-#   问题一致（见本地文档 docs/interception/2026-10-09-sim-stage-closeout.md §2，未纳入版本控制）：固件认为在左转、
+#   问题一致（见本地文档 docs/simulation/2026-10-09-sim-stage-closeout.md §2，未纳入版本控制）：固件认为在左转、
 #   模型实际右转。伴机侧取反即可（不改固件）。
 # 2026-09-28 第二次标定：坐标映射修正（gazebo_target_bridge: E=-y_g，去掉 FRD 翻转，
 # det 由 -1 变 +1）翻转了**水平面**的解释，因此当时在镜像坐标系下标定出的 roll/yaw

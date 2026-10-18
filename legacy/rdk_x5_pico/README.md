@@ -29,7 +29,7 @@ mainline. Keeping it at the repository root made the active tree ambiguous.
 | pico_fw/ | RP2040 PIO/DMA CVBS firmware |
 | motors.py | legacy props-off motor step test |
 | crsf.py | local CRSF parser used by the X5 companion |
-| scripts/ | X5 pinmux, GPIO/SPI probes, USB camera probes, old systemd unit |
+| scripts/ | X5 pinmux, GPIO/SPI probes, USB camera probes, old systemd unit, X5 board YOLO server |
 | model/*.bin | X5 BPU quantized model (not the Hailo HEF) |
 
 The Hailo ONNX source model remains active at model/v1_yolov8_mAP50_0.879.onnx.
