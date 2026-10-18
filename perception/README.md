@@ -1,6 +1,7 @@
 # perception/ —— 相机几何与目标状态估计
 
-纯计算层，被仿真链路（`sim/`）与机载链路（`detect.py` 一侧）共用。
+纯计算层，被仿真链路（`sim/`）与 Pi5 机载链路（`onboard/`）共用。
+旧 X5 的 `detect.py` 已归档到 `legacy/rdk_x5_pico/`。
 
 | 文件 | 职责 |
 |---|---|

@@ -10,7 +10,7 @@ __pycache__/
 nohup.out
 
 # Build artifacts
-pico_fw/build/
+legacy/rdk_x5_pico/pico_fw/build/
 
 # 大文件 / 媒体
 *.mp4

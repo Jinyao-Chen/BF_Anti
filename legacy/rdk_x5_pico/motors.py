@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""⚠️ 拆桨后运行: python3 ~/BF_Anti/motors.py"""
+"""⚠️ 拆桨后运行；已归档到 legacy/rdk_x5_pico/。"""
 import os, sys, time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))
 from msp import MSP, ARMING_FLAG_NAMES
 
 # 油门台阶 (RC 值, 1000=最低, 1100=慢转)

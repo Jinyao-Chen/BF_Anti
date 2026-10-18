@@ -16,7 +16,7 @@
 |------|--------|------|------|
 | **Pi5 机载（主线）** | Pi 5 + Hailo-8L + Betaflight FC | [`onboard/app.py`](onboard/app.py) | 相机/检测/制导/OSD/图传；当前相机、FC、DFC 未接，见 §Pi5 机载（sim2real） |
 | **SITL 仿真** | PC + Gazebo Harmonic + Betaflight SITL | [`sim/run_p_vision_strike.py`](sim/run_p_vision_strike.py) | 纯 P 视觉制导打击，见 §纯 P 视觉制导打击 与 [`sim/README.md`](sim/README.md) |
-| **旧版 RDK X5** | RDK X5 + Pico | [`detect.py`](detect.py) / [`run_detect.sh`](run_detect.sh) | BPU .bin 推理 + SPI PAL；待 Pi5 验收后归档 |
+| **旧版 RDK X5** | RDK X5 + Pico | [`detect.py`](legacy/rdk_x5_pico/detect.py) / [`run_detect.sh`](legacy/rdk_x5_pico/run_detect.sh) | BPU .bin 推理 + SPI PAL；已归档到 legacy/rdk_x5_pico/ |
 
 ---
 
@@ -89,9 +89,9 @@ python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef -
 
 ## 旧版 RDK X5 链路
 
-> 以下 §架构/§硬件/§配置/§使用方法 描述的是旧 RDK X5 + Pico 链路，
-> 保留用于对照与回滚；新工作请从上面的 Pi5 主线开始。
-> 待 Pi5 相机/FC/飞行验收后，detect.py、video.py、pico_fw、X5 工具会移到 legacy/rdk_x5_pico/。
+> 以下 §架构/§硬件/§配置/§使用方法 描述的是已归档的 RDK X5 + Pico 链路，
+> 代码在 [legacy/rdk_x5_pico/](legacy/rdk_x5_pico/README.md)，图上文件名仅作历史示意。
+> 新工作请从上面的 Pi5 主线开始。
 
 ---
 
@@ -155,33 +155,26 @@ BF_Anti/
 ├── config/                   onboard.example.json + profiles/*.json
 ├── tools/                    protocol_conformance / fw_motor_ab / hailo/*
 ├── systemd/                  bf-anti-onboard.service
-├── detect.py                 旧版 RDK X5 主程序: YOLO 检测 + 追踪 + MSP 控制
-├── tracker.py                中心距离目标追踪 (EMA 平滑 + 轨迹)
-├── tracking_controller.py    PBVS 视觉伺服 + 状态机 + PID 控制 (纯计算)
+├── legacy/rdk_x5_pico/       旧版 X5 + Pico 链路（已归档，见 legacy/README.md）
+│   ├── detect.py / tracker.py / tracking_controller.py
+│   ├── video.py / pico_fw/    PAL -> SPI -> Pico（旧图传）
+│   ├── crsf.py / motors.py / run_detect.sh
+│   ├── scripts/               X5 pinmux / GPIO / USB camera / 旧 service
+│   └── model/*.bin            X5 BPU 模型
 ├── rc_mux.py                 RC 融合层 (50Hz, 透传/替换)
-├── crsf.py                   CRSF 协议解码 + CRC8 校验
 ├── msp.py                    Betaflight MSP 协议驱动 (USB VCP)
-├── video.py                  PAL 视频帧编码 → SPI → Pico
-├── motors.py                 安全电机测试 (油门 1050→1100)
-├── run_detect.sh             一键启动脚本 (bench/track/fly)
-├── model/                    检测模型（.onnx 仿真 / .bin 上板）
+├── model/                    检测模型（ONNX 仿真/Hailo 源；X5 .bin 已归档）
 ├── guidance/                 制导律（主线 p_visual_guidance.py）+ XY 速度外环
 ├── perception/               相机几何 / 目标估计 / 3D KF
 ├── modeling/                 理论模型与整定（四旋翼、高度环、PID）
-├── sim/                      Gazebo SITL 仿真工作区 → 见 sim/README.md
+├── sim/                      Gazebo SITL 仿真工作区 -> 见 sim/README.md
 ├── docs/                     文档（本地保留、未纳入版本控制；见 .gitignore）
-├── pico_fw/                  Pico 协处理器固件 (C + PIO 汇编)
 ├── tests/                    单元测试（346 项）
 └── scripts/
-    ├── test_msp_override.py  BOXMSPOVERRIDE 地面测试
-    ├── rc_monitor.py         RC 通道实时监控
-    ├── crsf_monitor.py       CRSF 串口数据监控
-    ├── bf_anti.service       systemd 自启服务
-    ├── service_ctl.sh        服务管理脚本
-    ├── hw_test.py            SPI 硬件链路诊断
-    ├── gpio_probe.py         GPIO 探测工具
-    ├── usb_camera_probe.py   USB 摄像头能力探测
-    └── usb_camera_test_gst.py GStreamer 摄像头测试
+    ├── pi5_bringup.sh / pi5_install.sh / pi5_run_onboard.sh
+    ├── pi5_composite_check.sh / pi5_camera_probe.py
+    ├── fc_identify.py / rc_monitor.py / test_msp_override.py
+    └── legacy 脚本已移到 legacy/rdk_x5_pico/scripts/
 ```
 
 ---
@@ -197,7 +190,7 @@ ln -s ~/rdk_model_zoo ~/BF_Anti/rdk_model_zoo
 pip3 install pyserial numpy opencv-python
 
 # 开机自启
-cd ~/BF_Anti && ./scripts/service_ctl.sh install
+cd ~/BF_Anti && ./legacy/rdk_x5_pico/scripts/service_ctl.sh install
 ```
 
 ---
@@ -247,17 +240,17 @@ X5 USB     → 飞控 USB
 ### 基准检测 (无追踪)
 
 ```bash
-./run_detect.sh bench
+./legacy/rdk_x5_pico/run_detect.sh bench
 ```
 
 ### 追踪测试
 
 ```bash
 # 地面追踪 (base_throttle=1100)
-./run_detect.sh track
+./legacy/rdk_x5_pico/run_detect.sh track
 
 # 飞行追踪 (base_throttle=1550)
-./run_detect.sh fly
+./legacy/rdk_x5_pico/run_detect.sh fly
 ```
 
 ### MSP 控制命令
@@ -390,7 +383,7 @@ YOLO_PORT=9301 ./sim/trial_p_strike.sh b_onnx --target-width 2.38   # 无头单�
 
 GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index **1** = `GPU-40c96051-...`），
 绝不上 nvidia-smi index 0（其他用户的卡）。细节与两个坑见本地文档
-`docs/interception/2026-10-05-onnx-nvidia0-gpu-test.md`（未纳入版本控制）。
+`docs/archive/2026-09-10-sim-design/2026-10-05-onnx-nvidia0-gpu-test.md`（未纳入版本控制）。
 
 ---
 
@@ -404,7 +397,7 @@ GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index
 
 > 三者 mAP50：`.bin`/`.onnx` 同源（0.879，1 类）；`best.pt` 验证集 mAP50 0.9805 / mAP50-95 0.8205。
 > 仿真闭环里 `.onnx` 与 `.pt` 的**命中精度无差别**（见上表），差异只在 >40 m 段召回。
-> 追踪：中心距离匹配 + EMA 平滑（旧版机载 tracker.py）/ 门限关联 + 外推（perception/bbox_tracker.py，仿真与 Pi5 共用）。
+> 追踪：中心距离匹配 + EMA 平滑（旧版机载 legacy/rdk_x5_pico/tracker.py）/ 门限关联 + 外推（perception/bbox_tracker.py，仿真与 Pi5 共用）。
 
 ---
 

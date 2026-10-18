@@ -64,7 +64,7 @@ def test_crossing_target_lag_is_bounded_and_documented():
     """横向匀速目标：纯 P（无提前量）存在约 2*v_t 的追踪滞后。
 
     这里不改控制律，只把包线固化成回归：一旦有人加入 D/PN 项，脱靶量会突然变小，
-    测试会失败并提醒同步本地文档 docs/interception/2026-09-28-p-only-visual-guidance.md
+    测试会失败并提醒同步本地文档 docs/archive/2026-09-10-sim-design/2026-09-28-p-only-visual-guidance.md
     （未纳入版本控制）。
     """
     res = run(target_east=-20.0, target_north=55.0, target_up=10.0, target_vel_east=5.0)

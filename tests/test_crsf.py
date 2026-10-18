@@ -1,5 +1,5 @@
 # tests/test_crsf.py
-from crsf import crc8_dvb_s2, crsf_to_rc, CRSFParser, CRSF_TYPE_RC
+from legacy.rdk_x5_pico.crsf import crc8_dvb_s2, crsf_to_rc, CRSFParser, CRSF_TYPE_RC
 
 
 def build_rc_frame(raw_channels):
