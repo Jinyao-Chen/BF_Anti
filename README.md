@@ -28,7 +28,7 @@
 |---|---|---|
 | 机载电脑 | Raspberry Pi 5 Model B 4GB | 已实测 |
 | NPU | AI HAT+ Hailo-8L 13 TOPS (HAILO8L) | 已实测，HailoRT 4.23.0 |
-| 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已接；实际约 25 fps；图像需 rotate 90°；FOV/tilt 待标定 |
+| 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已接；实际约 25 fps；图像需 rotate 270°；FOV/tilt 待标定 |
 | 飞控 | Betaflight, 板卡待识别 | **未接**；target 不能猜 |
 | 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；目视未验 |
 | 模型 | YOLOv8n 1-class drone -> Hailo HEF | **128 帧真实相机校准 HEF 已在 Pi5 parse/run**；bench p50 16.21 ms，61.7 fps |
@@ -85,7 +85,7 @@ python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef -
 
 - 已实测：Pi5 J7 PAL 720x576i、fb0 BGRA 写入、HailoRT 4.23 + HAILO8L 识别、
   预编译 yolov8s HEF 100 帧、OSD+DisplayPipeline 25 FPS/6.5 ms 渲染、SITL MSP 协议 12 项通过。
-- 相机已接：/dev/video0（05a3:9230）MJPG 1280x720，CSV 实测约 25 fps；CameraSource rotate_deg=90
+- 相机已接：/dev/video0（05a3:9230）MJPG 1280x720，CSV 实测约 25 fps；CameraSource rotate_deg=270
   后输出 720x1280，HailoDetector 约 51 fps、单帧推理约 19.4 ms，0 errors。
 - 自编 HEF 已在 Pi5 验证：hailortcli parse-hef 显示 HAILO8L + 1-class NMS；hailortcli run
   100 帧 HW Latency 14.89 ms，芯片 31.3 C。
