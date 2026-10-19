@@ -31,7 +31,7 @@
 | 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已接；实际约 25 fps；图像需 rotate 90°；FOV/tilt 待标定 |
 | 飞控 | Betaflight, 板卡待识别 | **未接**；target 不能猜 |
 | 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；目视未验 |
-| 模型 | YOLOv8n 1-class drone -> Hailo HEF | DFC 3.33.0 本地已装；**HEF 已在 Pi5 parse/run**；128 帧真实相机校准 HEF 编译中 |
+| 模型 | YOLOv8n 1-class drone -> Hailo HEF | **128 帧真实相机校准 HEF 已在 Pi5 parse/run**；bench p50 16.21 ms，61.7 fps |
 
 ### 数据流
 
@@ -86,8 +86,10 @@ python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef -
   后输出 720x1280，HailoDetector 约 51 fps、单帧推理约 19.4 ms，0 errors。
 - 自编 HEF 已在 Pi5 验证：hailortcli parse-hef 显示 HAILO8L + 1-class NMS；hailortcli run
   100 帧 HW Latency 14.89 ms，芯片 31.3 C。
-- 已用真实 Pi 相机帧生成 128 帧校准集（100% real_pi_camera），正式 HEF 编译中；
-  128 帧仍低于推荐的 1024，不据此宣称精度。
+- 已用真实 Pi 相机帧生成 128 帧校准集（100% real_pi_camera），自编 HEF 在 Pi5 parse/run：
+  parse-hef HAILO8L + 1-class NMS；bench 200 帧 p50 16.21 ms、p95 16.26 ms、61.7 infer fps。
+  OSD 实测截图见 `build/camera_local/fb0_pi128.png`；当前场景墙面出现 0.31 的框，属未验证/疑似
+  误报，不作为精度结论。
 - 未实测（阻塞）：真实 FC 串口/接收机、BOXMSPOVERRIDE 实配、目标检测精度、1024 帧校准、
   拆桨电机 A/B、J7 目视、飞行。不要把这些写成已通过。
 
