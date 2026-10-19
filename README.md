@@ -73,6 +73,9 @@ bash scripts/pi5_bringup.sh --root /home/pi5/BF_Anti
 sudo bash scripts/pi5_install.sh
 python3 -m onboard.app --config config/onboard.json
 
+# 实时 OSD 网页（Pi 上另开进程；本机浏览器打开 http://<Pi-IP>:8088/）
+.venv/bin/python scripts/pi5_osd_stream.py --fb /dev/fb0 --port 8088
+
 # Hailo 工具
 python3 tools/hailo/check_env.py --role pi5
 python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef --frames 300
