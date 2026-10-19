@@ -14,7 +14,7 @@
 
 | 链路 | 跑在哪 | 入口 | 说明 |
 |------|--------|------|------|
-| **Pi5 机载（主线）** | Pi 5 + Hailo-8L + Betaflight FC | [`onboard/app.py`](onboard/app.py) | 相机/检测/制导/OSD/图传；当前相机、FC、DFC 未接，见 §Pi5 机载（sim2real） |
+| **Pi5 机载（主线）** | Pi 5 + Hailo-8L + Betaflight FC | [`onboard/app.py`](onboard/app.py) | 相机/检测/制导/OSD/图传；相机、FC 未接；DFC 已本地安装，见 §Pi5 机载（sim2real） |
 | **SITL 仿真** | PC + Gazebo Harmonic + Betaflight SITL | [`sim/run_p_vision_strike.py`](sim/run_p_vision_strike.py) | 纯 P 视觉制导打击，见 §纯 P 视觉制导打击 与 [`sim/README.md`](sim/README.md) |
 | **旧版 RDK X5** | RDK X5 + Pico | [`detect.py`](legacy/rdk_x5_pico/detect.py) / [`run_detect.sh`](legacy/rdk_x5_pico/run_detect.sh) | BPU .bin 推理 + SPI PAL；已归档到 legacy/rdk_x5_pico/ |
 
@@ -31,7 +31,7 @@
 | 相机 | USB UVC 1280x720 MJPG | **未接**；型号/FOV 待定 |
 | 飞控 | Betaflight, 板卡待识别 | **未接**；target 不能猜 |
 | 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；目视未验 |
-| 模型 | YOLOv8n 1-class drone -> Hailo HEF | **DFC 3.33.0 未装**，HEF 未编译 |
+| 模型 | YOLOv8n 1-class drone -> Hailo HEF | DFC 3.33.0 本地已装；**smoke HEF 已编译**（3 帧 OSD 校准，非正式） |
 
 ### 数据流
 
@@ -82,8 +82,10 @@ python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef -
 
 - 已实测：Pi5 J7 PAL 720x576i、fb0 BGRA 写入、HailoRT 4.23 + HAILO8L 识别、
   预编译 yolov8s HEF 100 帧、OSD+DisplayPipeline 25 FPS/6.5 ms 渲染、SITL MSP 协议 12 项通过。
-- 未实测（阻塞）：USB 相机、真实 FC 串口/接收机、BOXMSPOVERRIDE 实配、DFC 3.33.0 编译 HEF、
-  拆桨电机 A/B、J7 目视、飞行。不要把这些写成已通过。
+- 本地已编译：DFC 3.33.0 + 6 个 raw conv head + fused NMS，得到 9.1 MB smoke HEF；
+  校准仅 3 帧 OSD 截图，**不能用于精度结论**，也尚未在 Pi5 加载。
+- 未实测（阻塞）：USB 相机、真实 FC 串口/接收机、BOXMSPOVERRIDE 实配、真实校准集/1 类 HEF 精度、
+  HEF Pi5 加载、拆桨电机 A/B、J7 目视、飞行。不要把这些写成已通过。
 
 ---
 
