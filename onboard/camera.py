@@ -21,6 +21,8 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
+
+import numpy as np
 from typing import Any, Callable, Optional, Tuple
 
 LOG = logging.getLogger("bf_anti.camera")
@@ -104,6 +106,9 @@ class CameraSource:
         self.fps = float(getattr(cfg, "fps", 30.0))
         self.fourcc = str(getattr(cfg, "fourcc", "MJPG") or "MJPG")
         self.warmup_s = max(0.0, float(getattr(cfg, "warmup_s", 1.0) or 0.0))
+        self.rotate_deg = int(getattr(cfg, "rotate_deg", 0)) % 360
+        if self.rotate_deg not in (0, 90, 180, 270):
+            raise ValueError("camera rotate_deg must be 0/90/180/270")
         if self.fps <= 0.0:
             raise ValueError("camera fps must be positive")
         self._capture_factory = capture_factory
@@ -275,11 +280,18 @@ class CameraSource:
                         self._stop.wait(0.5)
                     continue
                 fails = 0
-                self._on_frame(frame)
+                self._on_frame(self._rotate_frame(frame))
         finally:
             self._first_attempt.set()
             if cap is not None:
                 self._release(cap)
+
+    def _rotate_frame(self, frame: Any) -> Any:
+        """Apply the configured clockwise rotation to a captured frame."""
+        if self.rotate_deg == 0:
+            return frame
+        k = {90: -1, 180: 2, 270: 1}[self.rotate_deg]
+        return np.ascontiguousarray(np.rot90(frame, k=k))
 
     def _open(self) -> Optional[Any]:
         """Open and configure the device; return the capture or None."""

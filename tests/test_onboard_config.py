@@ -29,6 +29,19 @@ def test_build_guidance_uses_measured_camera_geometry():
     assert (g.intrinsics.width, g.intrinsics.height) == (cfg.camera.width, cfg.camera.height)
 
 
+def test_rotation_swaps_guidance_image_size(tmp_path):
+    raw = json.load(open(EXAMPLE, encoding="utf-8"))
+    raw["camera"]["rotate_deg"] = 90
+    p = tmp_path / "rotated.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    cfg = load_config(str(p))
+    g = cfg.build_guidance()
+    assert (g.intrinsics.width, g.intrinsics.height) == (
+        cfg.camera.height,
+        cfg.camera.width,
+    )
+
+
 def test_duplicate_aux_channels_rejected(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
     raw["fc"]["aux_engage"] = raw["fc"]["aux_override"]

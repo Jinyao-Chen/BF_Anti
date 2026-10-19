@@ -166,6 +166,22 @@ def test_start_is_idempotent_and_captures_latest():
     assert src.running is False
 
 
+def test_rotation_90_clockwise_changes_frame_shape():
+    frame = np.arange(2 * 4 * 3, dtype=np.uint8).reshape(2, 4, 3)
+    cap = FakeCapture(frame=frame)
+    src = CameraSource(
+        make_cfg(width=4, height=2, rotate_deg=90),
+        capture_factory=CaptureFactory([cap]),
+    )
+    assert src.start() is True
+    assert wait_until(lambda: src.stats().frames >= 1)
+    got, _ = src.latest(None)
+    assert got is not None
+    assert got.shape == (4, 2, 3)
+    assert np.array_equal(got, np.ascontiguousarray(np.rot90(frame, k=-1)))
+    src.stop()
+
+
 def test_latest_drops_stale_frame():
     cap = FakeCapture()
     src = CameraSource(make_cfg(), capture_factory=CaptureFactory([cap]))

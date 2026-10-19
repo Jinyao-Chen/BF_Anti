@@ -23,6 +23,7 @@
     "height": 720,
     "fps": 30.0,
     "fourcc": "MJPG",
+    "rotate_deg": 0,
     "hfov_deg": 70.0,
     "vfov_deg": null,
     "tilt_deg": 44.0,
@@ -37,7 +38,9 @@
     "conf_threshold": 0.25,
     "iou_threshold": 0.45,
     "max_detections": 10,
-    "class_names": ["drone"],
+    "class_names": [
+      "drone"
+    ],
     "async_infer": true,
     "confirm_frames": 2,
     "max_coast_frames": 4,
@@ -50,18 +53,18 @@
     "params": {}
   },
   "safety": {
-    "max_rc_age_s": 0.30,
+    "max_rc_age_s": 0.3,
     "max_att_age_s": 0.25,
     "max_alt_age_s": 0.35,
-    "max_status_age_s": 0.60,
-    "max_loop_dt_s": 0.10,
-    "max_det_age_s": 0.40,
+    "max_status_age_s": 0.6,
+    "max_loop_dt_s": 0.1,
+    "max_det_age_s": 0.4,
     "min_altitude_m": 2.0,
     "max_altitude_m": 60.0,
     "max_range_m": 80.0,
     "min_battery_v": 0.0,
-    "target_confirm_s": 0.10,
-    "target_lost_s": 0.40,
+    "target_confirm_s": 0.1,
+    "target_lost_s": 0.4,
     "lost_reset_s": 1.5,
     "fault_latch": true
   },

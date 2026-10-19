@@ -72,6 +72,7 @@ class CameraConfig:
     height: int = 720
     fps: float = 30.0
     fourcc: str = "MJPG"
+    rotate_deg: int = 0
     hfov_deg: float = 70.0
     vfov_deg: Optional[float] = None
     tilt_deg: float = 44.0
@@ -221,6 +222,8 @@ class AppConfig:
             raise ValueError("camera width/height must be positive")
         if not (0.0 < self.camera.fps <= 240.0):
             raise ValueError("camera.fps must be in (0, 240]")
+        if int(self.camera.rotate_deg) % 360 not in (0, 90, 180, 270):
+            raise ValueError("camera.rotate_deg must be 0/90/180/270")
         if self.detector.backend not in ("hailo", "replay", "null"):
             raise ValueError("detector.backend must be hailo, replay or null")
         if self.detector.input_width <= 0 or self.detector.input_height <= 0:
@@ -249,8 +252,21 @@ class AppConfig:
 
         params = dict(self.guidance.params)
         params["camera_tilt_deg"] = float(self.camera.tilt_deg)
-        params["image_size"] = (int(self.camera.width), int(self.camera.height))
-        params["hfov_deg"] = float(self.camera.hfov_deg)
+        width, height = int(self.camera.width), int(self.camera.height)
+        hfov = float(self.camera.hfov_deg)
+        rotate = int(self.camera.rotate_deg) % 360
+        if rotate in (90, 270):
+            width, height = height, width
+            if self.camera.vfov_deg is not None:
+                hfov = float(self.camera.vfov_deg)
+            else:
+                import math
+                hfov = math.degrees(2.0 * math.atan(
+                    math.tan(math.radians(hfov) * 0.5)
+                    * float(self.camera.height) / float(self.camera.width)
+                ))
+        params["image_size"] = (width, height)
+        params["hfov_deg"] = hfov
         params.setdefault("camera_yaw_offset_deg", float(self.camera.yaw_offset_deg))
         return PVisualGuidance(**params)
 
