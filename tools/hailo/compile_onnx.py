@@ -138,7 +138,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     runner.translate_onnx_model(str(onnx_path), args.name, **translate_kwargs)
     if alls_path is not None:
         print("load model script: %s" % alls_path)
-        runner.load_model_script(alls_path.read_text(encoding="utf-8"))
+        script = alls_path.read_text(encoding="utf-8")
+        script = script.replace("@ALLS_DIR@", str(alls_path.parent))
+        runner.load_model_script(script)
     print("optimize (%d calibration frames) ..." % calib.shape[0])
     runner.optimize(calib)
     print("compile ...")

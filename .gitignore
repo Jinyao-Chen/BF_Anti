@@ -5,6 +5,9 @@ __pycache__/
 .ruff_cache/
 
 # 临时/中间产物
+acceleras.log
+allocator.log
+hailo_sdk.*.log
 *.whl
 *.tar.gz
 nohup.out

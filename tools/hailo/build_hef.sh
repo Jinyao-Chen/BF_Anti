@@ -9,14 +9,20 @@
 #                  an HMZ-compatible (raw-head) checkpoint plus a matching
 #                  model script, or a custom YAML that resolves one.
 #
-# DFC is NOT installed in this workspace; the official 3.33.0 wheel must be
-# supplied by the user. Until then this script exits early with BLOCKED and
-# the exact command it would have run.
+# DFC 3.33.0 is installed in the local venv for this workspace. The official
+# wheel is still required on a clean build host; without it this script exits
+# early with BLOCKED and the exact command it would have run.
 set -euo pipefail
 
 # Use the DFC virtualenv explicitly, e.g.
 #   PYTHON=$HOME/hailo_local/dfc_venv/bin/python tools/hailo/build_hef.sh ...
 PYTHON="${PYTHON:-python3}"
+# DFC's HSim op library needs libcudart symbols on a CPU-only host. Set this
+# to the local libcudart path if ClientRunner reports cudaPeekAtLastError:
+#   DFC_LD_PRELOAD=/path/to/libcudart.so.12
+if [ -n "${DFC_LD_PRELOAD:-}" ]; then
+  export LD_PRELOAD="$DFC_LD_PRELOAD"
+fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PIPELINE=dfc
 ONNX="$REPO_ROOT/model/v1_yolov8_mAP50_0.879.onnx"
@@ -29,7 +35,15 @@ CLASSES=1
 HMZ_DIR="${HAILO_MODEL_ZOO:-}"
 YAML=""
 MODEL_SCRIPT=""
-ALLS="$REPO_ROOT/tools/hailo/yolov8n_drone_raw.alls"
+ALLS="$REPO_ROOT/tools/hailo/yolov8n_drone_nms.alls"
+END_NODES=(
+  /model.22/cv2.0/cv2.0.2/Conv
+  /model.22/cv3.0/cv3.0.2/Conv
+  /model.22/cv2.1/cv2.1.2/Conv
+  /model.22/cv3.1/cv3.1.2/Conv
+  /model.22/cv2.2/cv2.2.2/Conv
+  /model.22/cv3.2/cv3.2.2/Conv
+)
 DRY_RUN=0
 SKIP_CHECK=0
 
@@ -115,12 +129,12 @@ if [ "$PIPELINE" = "dfc" ]; then
     exit 2
   fi
   echo "DFC command:"
-  echo "  $PYTHON tools/hailo/compile_onnx.py --onnx $ONNX --calib $CALIB --out $OUT --name $NETWORK --hw-arch $HW_ARCH --alls $ALLS"
+  echo "  $PYTHON tools/hailo/compile_onnx.py --onnx $ONNX --calib $CALIB --out $OUT --name $NETWORK --hw-arch $HW_ARCH --alls $ALLS --end-nodes ${END_NODES[*]}"
   if [ "$DRY_RUN" -eq 1 ]; then
-    "$PYTHON" "$REPO_ROOT/tools/hailo/compile_onnx.py" --onnx "$ONNX" --calib "$CALIB" --out "$OUT" --name "$NETWORK" --hw-arch "$HW_ARCH" --alls "$ALLS" --dry-run || true
+    "$PYTHON" "$REPO_ROOT/tools/hailo/compile_onnx.py" --onnx "$ONNX" --calib "$CALIB" --out "$OUT" --name "$NETWORK" --hw-arch "$HW_ARCH" --alls "$ALLS" --end-nodes "${END_NODES[@]}" --dry-run || true
     exit 0
   fi
-  "$PYTHON" "$REPO_ROOT/tools/hailo/compile_onnx.py" --onnx "$ONNX" --calib "$CALIB" --out "$OUT" --name "$NETWORK" --hw-arch "$HW_ARCH" --alls "$ALLS"
+  "$PYTHON" "$REPO_ROOT/tools/hailo/compile_onnx.py" --onnx "$ONNX" --calib "$CALIB" --out "$OUT" --name "$NETWORK" --hw-arch "$HW_ARCH" --alls "$ALLS" --end-nodes "${END_NODES[@]}"
 else
   if [ -z "$HMZ_DIR" ]; then
     echo "error: --hmz-dir (or HAILO_MODEL_ZOO) is required for --pipeline hmz" >&2
