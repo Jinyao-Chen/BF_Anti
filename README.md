@@ -76,6 +76,11 @@ python3 -m onboard.app --config config/onboard.json
 # 实时 OSD 网页（Pi 上另开进程；本机浏览器打开 http://<Pi-IP>:8088/）
 .venv/bin/python scripts/pi5_osd_stream.py --fb /dev/fb0 --port 8088
 
+# FC 姿态符号检查（只读；Pi 上跑，本机用 SSH 隧道看）
+.venv/bin/python scripts/fc_attitude_viewer.py --port /dev/ttyACM0 --http-port 8090
+# 本机：ssh -N -L 8090:127.0.0.1:8090 pi5@10.42.0.228
+# 浏览器：http://127.0.0.1:8090/
+
 # Hailo 工具
 python3 tools/hailo/check_env.py --role pi5
 python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef --frames 300
