@@ -208,6 +208,18 @@ def test_decode_altitude_u32_cm_and_i16_vario():
     assert vario_mps == pytest.approx(-2.5)
 
 
+def test_decode_altitude_rejects_unavailable_sentinel():
+    payload = struct.pack("<ih", -1, 0)
+    assert decode_altitude(payload) is None
+
+
+def test_decode_altitude_handles_negative_altitude():
+    payload = struct.pack("<ih", -125, 10)
+    altitude_m, vario_mps = decode_altitude(payload)
+    assert altitude_m == pytest.approx(-1.25)
+    assert vario_mps == pytest.approx(0.10)
+
+
 def test_decode_analog_9_byte_current_firmware():
     payload = struct.pack("<BHHhH", 126, 1234, 88, -350, 1680)
     decoded = decode_analog(payload)

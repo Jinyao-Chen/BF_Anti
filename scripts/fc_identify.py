@@ -50,8 +50,11 @@ def _api_version(payload):
 def _fc_version(payload):
     if not payload or len(payload) < 3:
         return None
+    # Betaflight 4.5.x uses a 2020 calendar epoch (4 -> 2024); newer
+    # builds use 2000. Accept both encodings for the 3-byte response.
+    year = (2020 if payload[0] < 20 else 2000) + payload[0]
     info = {
-        "year": 2000 + payload[0],
+        "year": year,
         "month": payload[1],
         "patch": payload[2],
         "version_string": None,

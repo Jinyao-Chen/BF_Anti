@@ -165,10 +165,14 @@ def check_variant_version(checks, link):
            "variant=%r" % text, {"variant": text})
 
     payload = _q(link, MSP_CMD.FC_VERSION)
-    if not payload or len(payload) < 4:
+    # Betaflight 4.5 returns exactly 3 bytes (year, month, patch); the
+    # optional version string is only present on some builds.
+    if not payload or len(payload) < 3:
         _check(checks, "fc_version", FAIL, "no/short MSP_FC_VERSION reply")
         return text, None
-    year = 2000 + payload[0]
+    # Betaflight 4.5.x returns a 2020-based year byte (4 -> 2024);
+    # newer builds use 2000. Accept both.
+    year = (2020 if payload[0] < 20 else 2000) + payload[0]
     version_string = None
     if len(payload) >= 5:
         length = payload[3]
@@ -261,7 +265,9 @@ def check_altitude(checks, link):
     payload = _q(link, MSP_CMD.GET_ALTITUDE)
     decoded = decode_altitude(payload) if payload else None
     if decoded is None:
-        _check(checks, "altitude", FAIL, "no/short MSP_ALTITUDE reply")
+        _check(checks, "altitude", BLOCKED,
+               "altitude unavailable (baro/position estimator not valid; USB-only or no battery)",
+               None, required=False)
         return None
     altitude_m, vario_mps = decoded
     plausible = -500.0 <= altitude_m <= 10000.0 and -100.0 <= vario_mps <= 100.0

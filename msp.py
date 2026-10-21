@@ -584,10 +584,19 @@ def decode_attitude(payload):
 
 
 def decode_altitude(payload):
-    """MSP_ALTITUDE -> (altitude_m, vario_mps).  u32 cm + int16 cm/s."""
+    """MSP_ALTITUDE -> (altitude_m, vario_mps).  int32 cm + int16 cm/s.
+
+    Betaflight returns the u32 two's-complement of ``-1`` when the position
+    estimator has no valid altitude (for example USB-only, no battery/baro
+    lock).  Do not turn that sentinel into 42,949,672 m.
+    """
     if payload is None or len(payload) < 6:
         return None
-    alt_cm = _u32(payload, 0)
+    # The MSP field is documented as u32, but Betaflight writes the signed
+    # estimate and uses -1 when the position estimator has no valid Z fix.
+    alt_cm = struct.unpack_from("<i", payload, 0)[0]
+    if alt_cm == -1:
+        return None
     vario_cm_s = _i16(payload, 4)
     return (alt_cm / 100.0, vario_cm_s / 100.0)
 

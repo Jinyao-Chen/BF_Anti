@@ -29,7 +29,7 @@
 | 机载电脑 | Raspberry Pi 5 Model B 4GB | 已实测 |
 | NPU | AI HAT+ Hailo-8L 13 TOPS (HAILO8L) | 已实测，HailoRT 4.23.0 |
 | 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已接；实际约 25 fps；相机已放平，rotate_deg=0；FOV/tilt 待标定 |
-| 飞控 | Betaflight, 板卡待识别 | **未接**；target 不能猜 |
+| 飞控 | Betaflight 4.5.3, S405 / OMNIBUSF4SD | **已接** USB `/dev/ttyACM0`；MSP override 已配置；接收机 RX_FAILSAFE、电池未接 |
 | 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；目视未验 |
 | 模型 | YOLOv8n 1-class drone -> Hailo HEF | **128 帧真实相机校准 HEF 已在 Pi5 parse/run**；bench p50 16.21 ms，61.7 fps |
 
@@ -61,7 +61,7 @@ USB UVC 1280x720 MJPG
 ### 快速命令
 
 ~~~bash
-# 本机单测（当前 348 项）
+# 本机单测（当前 350 项）
 python3 -m pytest -q
 
 # 协议自检（离线 / SITL TCP / 真机串口）
@@ -86,15 +86,19 @@ python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef -
 - 已实测：Pi5 J7 PAL 720x576i、fb0 BGRA 写入、HailoRT 4.23 + HAILO8L 识别、
   预编译 yolov8s HEF 100 帧、OSD+DisplayPipeline 25 FPS/6.5 ms 渲染、SITL MSP 协议 12 项通过。
 - 相机已接：/dev/video0（05a3:9230）MJPG 1280x720，CSV 实测约 25 fps；CameraSource rotate_deg=0
-  后输出 720x1280，HailoDetector 约 51 fps、单帧推理约 19.4 ms，0 errors。
+  后输出 1280x720，HailoDetector 约 51 fps、单帧推理约 19.4 ms，0 errors。
 - 自编 HEF 已在 Pi5 验证：hailortcli parse-hef 显示 HAILO8L + 1-class NMS；hailortcli run
   100 帧 HW Latency 14.89 ms，芯片 31.3 C。
 - 已用真实 Pi 相机帧生成 128 帧校准集（100% real_pi_camera），自编 HEF 在 Pi5 parse/run：
   parse-hef HAILO8L + 1-class NMS；bench 200 帧 p50 16.21 ms、p95 16.26 ms、61.7 infer fps。
   OSD 实测截图见 `build/camera_local/fb0_pi128.png`；当前场景墙面出现 0.31 的框，属未验证/疑似
   误报，不作为精度结论。
-- 未实测（阻塞）：真实 FC 串口/接收机、BOXMSPOVERRIDE 实配、目标检测精度、1024 帧校准、
-  拆桨电机 A/B、J7 目视、飞行。不要把这些写成已通过。
+- FC 已接入并完成只读+配置检查：S405/OMNIBUSF4SD，Betaflight 4.5.3，`/dev/ttyACM0`；
+  `msp_override_channels_mask=15`、`msp_override_failsafe=ON`，AUX1=ARM、AUX2=ANGLE、AUX3=MSP OVERRIDE；
+  16 通道 RC round-trip max diff 0，协议 12 pass / 0 fail（attitude_sign 仍需实机倾斜，MSP2 position 不支持）。
+- 当前 FC 仍报 `RX_FAILSAFE`，且 `0S battery - NOT PRESENT`；接收机/电池/拆桨电机 A/B/飞行未验。
+- 未实测（阻塞）：接收机有效链路、ARM/ANGLE 实机切换、拆桨电机 A/B、目标检测精度、1024 帧校准、
+  J7 目视、飞行。不要把这些写成已通过。
 
 ---
 
@@ -180,7 +184,7 @@ BF_Anti/
 ├── modeling/                 理论模型与整定（四旋翼、高度环、PID）
 ├── sim/                      Gazebo SITL 仿真工作区 -> 见 sim/README.md
 ├── docs/                     文档（本地保留、未纳入版本控制；见 .gitignore）
-├── tests/                    单元测试（348 项）
+├── tests/                    单元测试（350 项）
 └── scripts/
     ├── pi5_bringup.sh / pi5_install.sh / pi5_run_onboard.sh
     ├── pi5_composite_check.sh / pi5_camera_probe.py
@@ -355,7 +359,7 @@ Gazebo/Betaflight SITL 下的**纯比例（P-only）视觉制导**打击闭环�
 稳定性根因与修复 · 检测后端实测对比。
 
 ```bash
-# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 348 项）
+# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 350 项）
 python3 -m pytest -q
 
 # 运动学包线：静态/径向目标命中，横向匀速目标记录滞后
@@ -423,4 +427,4 @@ GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index
 | `sim/results/` | 验证数据（`.csv`/`.png`）；复盘报告 `*.md` 为本地文档 |
 
 代码规范：Python 以 `python3 -m flake8 --select=E9,F63,F7,F82,F401,F841,E722,W605` 零告警为准，
-`python3 -m pytest -q` 全绿（当前 348 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
+`python3 -m pytest -q` 全绿（当前 350 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
