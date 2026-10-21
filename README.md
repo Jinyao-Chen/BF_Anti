@@ -103,6 +103,8 @@ python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef -
   16 通道 RC round-trip max diff 0，协议 12 pass / 0 fail（attitude_sign 仍需实机倾斜，MSP2 position 不支持）。
 - 但 FC 当前 `feature` 是 **RX_MSP**（`RX_SERIAL` 关闭），三路 UART 都没有 serial RX；`serialrx_provider=CRSF`
   只是未生效的配置。RC round-trip 验证的是 MSP 输入，不是飞手 CRSF 接收机。
+- 手动姿态测试：ROLL + = 右翼下压、YAW 向左减小；PITCH 的 Betaflight 原始符号是 + = 低头，
+  已在 `onboard/fc/state.py` 转为 + = 抬头，OSD/guidance 使用航空约定。
 - 当前 FC 仍报 `RX_FAILSAFE`，且 `0S battery - NOT PRESENT`；接收机/电池/拆桨电机 A/B/飞行未验。
 - 未实测（阻塞）：CRSF 接收机接入与 UART 配置、飞手 ARM/ANGLE/OVERRIDE 独立开关、拆桨电机 A/B、
   目标检测精度、1024 帧校准、J7 目视、飞行。不要把这些写成已通过。

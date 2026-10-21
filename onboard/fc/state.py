@@ -8,6 +8,8 @@ Rules:
 * Never invent a value.  A field whose reply has not arrived keeps the FcState
   default and a zero timestamp; consumers check ages.
 * yaw is whole degrees (MSP_ATTITUDE); roll/pitch are 0.1 deg.
+* rpy_deg is aviation convention: +roll = right wing down, +pitch = nose up.
+  MSP_ATTITUDE pitch is negated on ingest (Betaflight +pitch = nose down).
 * MSP_RC is converted to AETR (the FC sends R,P,Y,T).
 * MSP2 0x3015 position state is optional; after a few misses it is disabled so
   an older FC does not pay a timeout on every poll.
@@ -122,7 +124,12 @@ class FcStateEstimator:
         if payload is not None:
             attitude = decode_attitude(payload)
             if attitude is not None:
-                updates["rpy_deg"] = attitude
+                # MSP_ATTITUDE follows Betaflight: +pitch is nose down.
+                # FcState/guidance/OSD use aviation convention: +pitch is
+                # nose up.  Roll (+right wing down) and yaw (+right turn)
+                # already match.
+                roll, pitch, yaw = attitude
+                updates["rpy_deg"] = (roll, -pitch, yaw)
                 updates["att_t"] = now
             else:
                 self._errors += 1

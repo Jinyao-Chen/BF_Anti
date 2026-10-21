@@ -66,6 +66,7 @@ class AttitudeState:
             return {
                 "roll_deg": round(self.roll, 2),
                 "pitch_deg": round(self.pitch, 2),
+                "pitch_aviation_deg": round(-self.pitch, 2),
                 "yaw_deg": round(self.yaw, 2),
                 "age_ms": None if age is None else round(age * 1000.0, 1),
                 "seq": self.seq,
@@ -174,14 +175,15 @@ button{background:#222;color:#ddd;border:1px solid #555;border-radius:4px;paddin
   <canvas id="h" width="520" height="330"></canvas>
   <div class="nums">
     <div class="row"><span>ROLL</span><span class="val" id="roll">--</span></div>
-    <div class="row"><span>PITCH</span><span class="val" id="pitch">--</span></div>
+    <div class="row"><span>PITCH (BF raw)</span><span class="val" id="pitch">--</span></div>
+    <div class="row"><span>PITCH (aviation)</span><span class="val" id="pitch_av">--</span></div>
     <div class="row"><span>YAW</span><span class="val" id="yaw">--</span></div>
     <div class="row"><span>样本</span><span class="val" id="samples">--</span></div>
     <div class="row"><span>数据年龄</span><span class="val" id="age">--</span></div>
     <div class="row"><span>错误</span><span class="val" id="errors">--</span></div>
     <p><button id="zero">记录当前为零点</button><button id="clear">恢复原始角度</button></p>
     <div id="err" class="err"></div>
-    <p class="small">约定：ROLL positive / negative、PITCH positive / negative、YAW 0..360。先记录零点，再缓慢转动每个轴。</p>
+    <p class="small">PITCH 第一行是 Betaflight 原始值：+ = 低头；第二行已转成控制约定：+ = 抬头。ROLL + = 右翼下压；YAW 0..360，向右增加。</p>
   </div>
 </div>
 <script>
@@ -191,7 +193,8 @@ function draw(roll,pitch,yaw){
   const w=cv.width,h=cv.height,cx=w/2,cy=h/2+20;
   ctx.save(); ctx.clearRect(0,0,w,h);
   ctx.translate(cx,cy); ctx.rotate(roll*Math.PI/180);
-  const off=Math.max(-160,Math.min(160,pitch*3.2));
+  const pitchAv=-pitch;  // Betaflight raw +pitch = nose down
+  const off=Math.max(-160,Math.min(160,pitchAv*3.2));
   ctx.fillStyle='#3a78b8'; ctx.fillRect(-w,-h,2*w,h+off);
   ctx.fillStyle='#8a5a36'; ctx.fillRect(-w,off,2*w,h);
   ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(-w,off); ctx.lineTo(w,off); ctx.stroke();
@@ -208,6 +211,7 @@ async function tick(){
     if(useZero){roll-=zero.r;pitch-=zero.p;yaw=(yaw-zero.y+360)%360;}
     document.getElementById('roll').textContent=d.roll_deg.toFixed(1)+'°';
     document.getElementById('pitch').textContent=d.pitch_deg.toFixed(1)+'°';
+    document.getElementById('pitch_av').textContent=d.pitch_aviation_deg.toFixed(1)+'°';
     document.getElementById('yaw').textContent=d.yaw_deg.toFixed(1)+'°';
     document.getElementById('samples').textContent=d.samples;
     document.getElementById('age').textContent=(d.age_ms==null?'--':d.age_ms.toFixed(0)+' ms');

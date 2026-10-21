@@ -61,7 +61,8 @@ def test_single_poll_decodes_all_fields_and_uses_degrees():
     state = estimator.snapshot()
 
     assert isinstance(state, FcState)
-    assert state.rpy_deg == (10.0, -5.0, 270.0)   # yaw is degrees
+    # MSP raw pitch=-5 (Betaflight +pitch=nose down) -> aviation +5 nose up.
+    assert state.rpy_deg == (10.0, 5.0, 270.0)   # yaw is degrees
     assert state.altitude_m == 25.0
     assert state.vario_mps == 1.25
     assert state.rc[:4] == (1100, 1200, 1400, 1300)  # Y/T swapped to AETR
