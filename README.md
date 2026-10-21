@@ -29,7 +29,7 @@
 | 机载电脑 | Raspberry Pi 5 Model B 4GB | 已实测 |
 | NPU | AI HAT+ Hailo-8L 13 TOPS (HAILO8L) | 已实测，HailoRT 4.23.0 |
 | 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已接；实际约 25 fps；相机已放平，rotate_deg=0；FOV/tilt 待标定 |
-| 飞控 | Betaflight 4.5.3, S405 / OMNIBUSF4SD | **已接** USB `/dev/ttyACM0`；MSP override 已配置；接收机 RX_FAILSAFE、电池未接 |
+| 飞控 | Betaflight 4.5.3, S405 / OMNIBUSF4SD | **已接** USB `/dev/ttyACM0`；MSP override 已配置；当前 `RX_MSP`（无 CRSF 串行接收机）、`RX_FAILSAFE`、电池未接 |
 | 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；目视未验 |
 | 模型 | YOLOv8n 1-class drone -> Hailo HEF | **128 帧真实相机校准 HEF 已在 Pi5 parse/run**；bench p50 16.21 ms，61.7 fps |
 
@@ -96,9 +96,11 @@ python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef -
 - FC 已接入并完成只读+配置检查：S405/OMNIBUSF4SD，Betaflight 4.5.3，`/dev/ttyACM0`；
   `msp_override_channels_mask=15`、`msp_override_failsafe=ON`，AUX1=ARM、AUX2=ANGLE、AUX3=MSP OVERRIDE；
   16 通道 RC round-trip max diff 0，协议 12 pass / 0 fail（attitude_sign 仍需实机倾斜，MSP2 position 不支持）。
+- 但 FC 当前 `feature` 是 **RX_MSP**（`RX_SERIAL` 关闭），三路 UART 都没有 serial RX；`serialrx_provider=CRSF`
+  只是未生效的配置。RC round-trip 验证的是 MSP 输入，不是飞手 CRSF 接收机。
 - 当前 FC 仍报 `RX_FAILSAFE`，且 `0S battery - NOT PRESENT`；接收机/电池/拆桨电机 A/B/飞行未验。
-- 未实测（阻塞）：接收机有效链路、ARM/ANGLE 实机切换、拆桨电机 A/B、目标检测精度、1024 帧校准、
-  J7 目视、飞行。不要把这些写成已通过。
+- 未实测（阻塞）：CRSF 接收机接入与 UART 配置、飞手 ARM/ANGLE/OVERRIDE 独立开关、拆桨电机 A/B、
+  目标检测精度、1024 帧校准、J7 目视、飞行。不要把这些写成已通过。
 
 ---
 
