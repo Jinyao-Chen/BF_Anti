@@ -321,7 +321,7 @@ class OsdRenderer:
         if self.osd:
             if fit is not None and self.draw_box and detection is not None:
                 self._draw_detection(canvas, detection, fit, out)
-            self._draw_hud(canvas, detection, out, state, decision, now, status)
+            self._draw_hud(canvas, detection, out, state, decision, now, status, fit=fit)
             self._draw_crosshair(canvas)
         return canvas
 
@@ -370,6 +370,7 @@ class OsdRenderer:
         decision: Any,
         now: float,
         status: Optional[OsdStatus],
+        fit: Optional[Fit] = None,
     ) -> None:
         status = status or OsdStatus()
         readout = format_readout(out, state, decision, status, detection)
@@ -381,9 +382,24 @@ class OsdRenderer:
             mode_color = COLOR_WARN
         elif mode_name == "TRACK":
             mode_color = COLOR_OK
-        self._put(canvas, mode, (_MARGIN, 20), 0.55, mode_color)
+        # Analog goggles commonly overscan/crop the outer 5-10% of PAL.
+        # Keep the HUD inside the camera content, not on the letterbox bars,
+        # so goggles that crop black bars still show the text.  Detection
+        # boxes still use the full image.
+        mx = max(_MARGIN, int(round(self.width * 0.06)))
+        if fit is not None and fit.content_h > 0:
+            content_top = max(0, int(fit.offset_y))
+            content_bottom = min(self.height, content_top + int(fit.content_h))
+            top = content_top + max(8, int(round(fit.content_h * 0.04)))
+            bottom = content_bottom - max(40, int(round(fit.content_h * 0.08)))
+        else:
+            top = max(_MARGIN, int(round(self.height * 0.10)))
+            bottom = self.height - max(40, int(round(self.height * 0.10)))
+        top = max(_MARGIN, min(self.height - 30, top))
+        bottom = max(top + 60, min(self.height - 28, bottom))
+        self._put(canvas, mode, (mx, top), 0.62, mode_color)
         self._put(
-            canvas, readout["safety"], (_MARGIN, 40), 0.45,
+            canvas, readout["safety"], (mx, top + 22), 0.52,
             COLOR_OK if approved else COLOR_WARN,
         )
         if detection is not None:
@@ -393,27 +409,25 @@ class OsdRenderer:
                 stamp = 0.0
             if stamp > 0.0 and now > 0.0:
                 age_ms = max(0.0, (float(now) - stamp) * 1000.0)
-                self._put(canvas, "TGT %4.0fms" % age_ms, (_MARGIN, 60), 0.42, COLOR_DIM)
+                self._put(canvas, "TGT %4.0fms" % age_ms, (mx, top + 44), 0.48, COLOR_DIM)
         lock = readout["lock"]
         lock_color = COLOR_LOCK if lock == "LOCK" else COLOR_NO_LOCK
         lock_scale = 0.75 if lock == "LOCK" else 0.55
         lock_w = self._text.text_size(lock, lock_scale)[0]
         self._put(
-            canvas, lock, (max(_MARGIN, (self.width - lock_w) // 2), 24),
+            canvas, lock, (max(mx, (self.width - lock_w) // 2), top + 4),
             lock_scale, lock_color,
         )
-        right_x = self.width - _MARGIN
-        self._put_right(canvas, readout["loop"], right_x, 20, 0.45, COLOR_TEXT)
-        self._put_right(canvas, readout["latency"], right_x, 40, 0.45, COLOR_TEXT)
-        self._put_right(canvas, readout["display"], right_x, 60, 0.42, COLOR_DIM)
-        self._put(canvas, readout["alt"], (_MARGIN, self.height - 28), 0.45, COLOR_TEXT)
-        self._put(canvas, readout["battery"], (_MARGIN, self.height - 8), 0.45, COLOR_DIM)
-        self._put_right(
-            canvas, readout["range"], right_x, self.height - 28, 0.45, COLOR_TEXT
-        )
+        right_x = self.width - mx
+        self._put_right(canvas, readout["loop"], right_x, top, 0.52, COLOR_TEXT)
+        self._put_right(canvas, readout["latency"], right_x, top + 22, 0.52, COLOR_TEXT)
+        self._put_right(canvas, readout["display"], right_x, top + 44, 0.48, COLOR_DIM)
+        self._put(canvas, readout["alt"], (mx, bottom), 0.52, COLOR_TEXT)
+        self._put(canvas, readout["battery"], (mx, bottom + 20), 0.52, COLOR_DIM)
+        self._put_right(canvas, readout["range"], right_x, bottom, 0.52, COLOR_TEXT)
         self._put_right(
             canvas, "BOX %s" % ("ON" if self.draw_box else "OFF"),
-            right_x, self.height - 8, 0.42, COLOR_DIM,
+            right_x, bottom + 20, 0.48, COLOR_DIM,
         )
 
     def _draw_crosshair(self, canvas: np.ndarray) -> None:

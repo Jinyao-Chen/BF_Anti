@@ -146,7 +146,8 @@ def test_unconfirmed_detection_uses_acquisition_colour():
 def test_draw_box_option_disables_only_the_box():
     renderer = OsdRenderer(160, 90, draw_box=False)
     det = Detection((20.0, 10.0, 60.0, 40.0), 0.9)
-    img = renderer.render(gray_frame(), det, make_out(confirmed=True))
+    # SEARCH has no green HUD text, so COLOR_BOX uniquely identifies the box.
+    img = renderer.render(gray_frame(), det, make_out(confirmed=False, mode=Mode.SEARCH))
     assert not color_mask(img, COLOR_BOX).any()
     assert color_mask(img, COLOR_CROSSHAIR).any()
 
@@ -162,7 +163,7 @@ def test_box_is_clipped_to_canvas():
 def test_nan_detection_is_ignored():
     renderer = OsdRenderer(160, 90)
     det = Detection((float("nan"), 0.0, 10.0, 10.0), 0.9)
-    img = renderer.render(gray_frame(), det, make_out(confirmed=True))
+    img = renderer.render(gray_frame(), det, make_out(confirmed=False, mode=Mode.SEARCH))
     assert img.shape == (90, 160, 4)
     assert not color_mask(img, COLOR_BOX).any()
 
