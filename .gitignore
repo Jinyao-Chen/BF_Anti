@@ -5,18 +5,25 @@ __pycache__/
 .ruff_cache/
 
 # 临时/中间产物
+acceleras.log
+allocator.log
+hailo_sdk.*.log
 *.whl
 *.tar.gz
 nohup.out
 
 # Build artifacts
-pico_fw/build/
+legacy/rdk_x5_pico/pico_fw/build/
 
 # 大文件 / 媒体
 *.mp4
+*.hef
+logs/
+build/
+config/onboard.json
 
-# Symlinks
-betaflight
+# Symlinks (root-level only; keep config/betaflight tracked)
+/betaflight
 rdk_model_zoo
 Anti-UAV/
 

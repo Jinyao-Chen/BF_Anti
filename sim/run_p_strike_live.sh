@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BF_ROOT="${BF_ROOT:-$HOME/betaflight}"
-WORLD="${BF_ANTI_WORLD:-$SCRIPT_DIR/worlds/bf_anti_p_strike_light_cam.sdf}"
+WORLD="${BF_ANTI_WORLD:-$SCRIPT_DIR/worlds/bf_anti_p_strike_light_shell.sdf}"
 DURATION="${DURATION:-32}"
 VIDEO="${VIDEO:-/tmp/p_strike_live.mp4}"
 GUI="${GUI:-0}"
@@ -69,12 +69,12 @@ PY
 
 ensure_yolo() {
     if [ "${YOLO_DIRECT}" = "1" ]; then
-        # 直连模式：检测服务已经在 YOLO_HOST 上跑（例如板上 python3 sim/yolo_server_board.py）
+        # 直连模式：检测服务已经在 YOLO_HOST 上跑（X5 旧服务见 legacy/rdk_x5_pico/scripts/yolo_server_board.py）
         if probe_yolo "${YOLO_HOST}"; then
             echo "[live] YOLO 直连可用 (${YOLO_HOST}:${YOLO_PORT})"; return 0
         fi
         echo "[live] WARNING: 直连 ${YOLO_HOST}:${YOLO_PORT} 不可用。"
-        echo "        先在板上起服务: python3 sim/yolo_server_board.py --host 0.0.0.0 --port ${YOLO_PORT}"
+        echo "        先在板上起服务: python3 legacy/rdk_x5_pico/scripts/yolo_server_board.py --host 0.0.0.0 --port ${YOLO_PORT}"
         return 1
     fi
     if probe_yolo; then echo "[live] YOLO 服务可用 (127.0.0.1:${YOLO_PORT})"; return 0; fi
@@ -161,16 +161,18 @@ fi
 
 python3 "${SCRIPT_DIR}/run_p_vision_strike.py" \
     ${DETECTOR} --mask-own-horiz "${MASK_HORIZ}" \
-    --show --video "${VIDEO}" --duration "${DURATION}" \
-    --inner-model "" --cam-link cam_link --view camera \
-    --hover-pwm 1430 --tilt 20 --climb-alt ${CLIMB_ALT:-5} --stage-pitch 8 \
-    --max-pitch-down 25 --angle-limit 40 --kp-pitch 13 --kp-yaw 220 --max-yaw-rate 300 \
-    --kp-roll ${KP_ROLL:-45} --kp-z ${KP_Z:-1.0} --max-roll 30 --kp-speed 4 --v-max 5 --kp-velalign ${KP_VELALIGN:-1.5} \
-    --align-gate 0.05 --align-pitch 5 --lift-ff --lost-timeout 0.9 --lost-frames 8 \
+    --show --video "${VIDEO}" --duration "${DURATION}" --hold-after-s "${HOLD_AFTER_S:-0}" \
+    --inner-model light_quad --cam-link base_link --view camera \
+    --hover-pwm 1430 --tilt 40 --climb-alt ${CLIMB_ALT:-5} --stage-pitch ${STAGE_PITCH:-30} \
+    --max-pitch-down ${MAX_PITCH_DOWN:-50} --angle-limit 60 --kp-pitch 13 --kp-yaw 220 --max-yaw-rate 300 \
+    --kp-roll ${KP_ROLL:-45} --kp-z ${KP_Z:-1.0} --max-roll 30 --kp-speed ${KP_SPEED:-8} --v-max ${V_MAX:-10} --kp-velalign ${KP_VELALIGN:-1.5} \
+    --align-gate 0.15 --align-pitch ${ALIGN_PITCH:-18} --lift-ff --lost-timeout 0.9 --lost-frames 8 \
+    --controller ${CONTROLLER:-pn} --att-mode ${ATT_MODE:-rate} \
+    --speed-source ${SPEED_SOURCE:-closing} \
     --vz-time-to-go ${T2G:-1} --ki-z ${KI_Z:-0.05} \
     --err-soft ${ERR_SOFT:-0.35} --tau-max ${TAU_MAX:-3.0} \
     --velalign-min-speed ${VA_MIN:-2.5} --velalign-soft ${VA_SOFT:-10} \
     --range-lpf ${RANGE_LPF:-0.25} --closing-max ${CLOSE_MAX:-25} \
-    --vmax-close-range ${VMAX_CLOSE_R:-12} --vmax-close-floor ${VMAX_CLOSE_F:-3} \
+    --vmax-close-range ${VMAX_CLOSE_R:-15} --vmax-close-floor ${VMAX_CLOSE_F:-4} \
     --reacquire-angle ${REACQ_ANGLE:-60} --reacquire-rate ${REACQ_RATE:-200} \
     --log "${LOG}" --plot "${LOG%.csv}.png" "$@"

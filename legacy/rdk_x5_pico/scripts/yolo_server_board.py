@@ -10,16 +10,16 @@
     # 依赖: rdk_model_zoo 的 Ultralytics YOLO 运行时 + opencv-python + numpy
     git clone https://github.com/D-Robotics/rdk_model_zoo.git ~/rdk_model_zoo
     ln -s ~/rdk_model_zoo ~/BOARD_HOME/BF_Anti/rdk_model_zoo
-    python3 sim/yolo_server_board.py \
-        --model-path model/v1_yolov8_mAP50_0.879_bayese_640x640_nv12.bin \
-        --label-file model/labels.txt --host 0.0.0.0 --port 9300
+    python3 legacy/rdk_x5_pico/scripts/yolo_server_board.py \
+        --model-path legacy/rdk_x5_pico/model/v1_yolov8_mAP50_0.879_bayese_640x640_nv12.bin \
+        --label-file legacy/rdk_x5_pico/model/labels.txt --host 0.0.0.0 --port 9300
 
 本机（仿真）侧::
 
     # 直连
     YOLO_DIRECT=1 YOLO_HOST=<板子IP> YOLO=1 GUI=1 ./sim/run_p_strike_live.sh
     # 或沿用 SSH 隧道（板上开 sshd）
-    YOLO_SSH=<板子用户>@<板子IP> YOLO_REMOTE_CMD='cd ~/BF_Anti && python3 sim/yolo_server_board.py ...' \
+    YOLO_SSH=<板子用户>@<板子IP> YOLO_REMOTE_CMD='cd ~/BF_Anti && python3 legacy/rdk_x5_pico/scripts/yolo_server_board.py ...' \
         YOLO=1 GUI=1 ./sim/run_p_strike_live.sh
 
 类别名注意：本机客户端的 TARGET_NAMES 只认 {"copter_drone","motor_drone"}。
@@ -41,7 +41,8 @@ import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(SCRIPT_DIR)
-MODEL_ZOO = os.path.join(ROOT, "rdk_model_zoo")
+REPO_ROOT = os.path.dirname(os.path.dirname(ROOT))
+MODEL_ZOO = os.path.join(REPO_ROOT, "rdk_model_zoo")
 RUNTIME_DIR = os.path.join(MODEL_ZOO, "samples/vision/ultralytics_yolo/runtime/python")
 sys.path.append(MODEL_ZOO)
 sys.path.append(RUNTIME_DIR)
@@ -85,7 +86,7 @@ def build_model(args):
     model.set_scheduling_params(priority=args.priority, bpu_cores=args.bpu_cores)
     print("[board-server] model input %dx%d" % (model.input_w, model.input_h), flush=True)
 
-    # 与 detect.py 相同的类数自检：YOLOv8 头里 box 维 = 4*reg，剩下那一维就是类数
+    # 与 legacy/rdk_x5_pico/detect.py 相同的类数自检：YOLOv8 头里 box 维 = 4*reg，剩下那一维就是类数
     n_classes = args.classes_num or 1
     try:
         box_last = 4 * args.reg

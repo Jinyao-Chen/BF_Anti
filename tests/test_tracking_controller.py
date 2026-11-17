@@ -2,7 +2,7 @@
 # Tracker test — Integration with TrackingController after refactor
 
 import numpy as np
-from tracking_controller import PID, TargetSelector, TrackingController
+from legacy.rdk_x5_pico.tracking_controller import PID, TargetSelector, TrackingController
 from rc_mux import TrackCmd
 
 FRAME = np.zeros((720, 1280, 3), dtype=np.uint8)

@@ -22,9 +22,11 @@ from collections import deque
 import cv2
 import numpy as np
 
-# rdk_model_zoo paths
+# rdk_model_zoo paths (archived path; the active Pi5 runtime is onboard/app.py)
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
-MODEL_ZOO    = os.path.join(SCRIPT_DIR, "rdk_model_zoo")
+REPO_ROOT    = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+sys.path.insert(0, REPO_ROOT)
+MODEL_ZOO    = os.path.join(REPO_ROOT, "rdk_model_zoo")
 RUNTIME_DIR  = os.path.join(MODEL_ZOO, "samples/vision/ultralytics_yolo/runtime/python")
 sys.path.append(MODEL_ZOO)
 sys.path.append(RUNTIME_DIR)

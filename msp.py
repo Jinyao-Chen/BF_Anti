@@ -26,6 +26,7 @@ import struct
 import time
 import sys
 import threading
+from dataclasses import dataclass
 
 # ---- MSP 协议常量 -----------------------------------------------------------
 
@@ -34,12 +35,20 @@ class MSP_CMD:
     API_VERSION       = 1
     FC_VARIANT        = 2
     FC_VERSION        = 3
+    BOARD_INFO        = 4
+    GET_STATUS        = 101
+    MSP_MOTOR         = 104
+    GET_RC            = 105
     GET_ATTITUDE      = 108
     GET_ALTITUDE      = 109
     GET_ANALOG        = 110
-    GET_RC            = 105
+    BOXNAMES          = 116
+    BOXIDS            = 119
+    MODE_RANGES       = 34
     GET_STATUS_EX     = 150
     SET_RAW_RC        = 200
+    # MSP2 (native v2) command; payload layout is firmware-specific.
+    MSP2_POSITION_STATE = 0x3015
 
 
 # Arming disable flags — Betaflight 4.5-maintenance fc/runtime_config.h
@@ -331,6 +340,505 @@ class MSP:
             self._telem_thread.join(timeout=0.5)
         self.stream_stop()
         self.ser.close()
+
+
+# ---- MSP v1/v2 framing, CRC and payload decoders ----------------------------
+#
+# Reference firmware: Betaflight branch sim2real-2026-10-17
+# (src/main/msp/msp_serial.c for framing, src/main/msp/msp.c for payloads).
+# See docs/sim2real/protocol_contract.md for the offsets and units below.
+#
+# These helpers are pure functions/objects: no serial port is touched, so they
+# can be unit-tested and used by the conformance tool on a laptop.
+
+MSP_HEADER_V2 = b"$X<"
+MSP_HEADER_V2_R = b"$X>"
+
+# MSP v1 response for payloads >= 255 bytes: size byte 255, u16 jumbo size,
+# payload, checksum (cmd keeps its normal value).  Betaflight emits this for
+# e.g. the BOXNAMES page-1 response when a client talks v1.
+MSP_V1_SIZE_LIMIT = 255
+
+
+def crc8_dvb_s2(data, crc=0):
+    """CRC-8/DVB-S2 (poly 0xD5, init 0, no reflection/xorout)."""
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x80:
+                crc = ((crc << 1) ^ 0xD5) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
+    return crc
+
+
+@dataclass(frozen=True)
+class MspFrame:
+    """One decoded MSP frame. direction is '<' (to FC) or '>' / '!' (from)."""
+
+    cmd: int
+    payload: bytes
+    is_v2: bool = False
+    direction: str = ">"
+    error: bool = False
+
+
+def build_frame_v1(cmd, payload=b"", direction="<", error=False):
+    """Build an MSP v1 frame (<=254 B payload) or a v1 jumbo frame (>=255 B).
+
+    Links only send tiny requests; the FC's input buffer is 192 B.  Replies and
+    synthetic conformance frames may be larger, and Betaflight emits the jumbo
+    form for those (size=255, u16 real size, logical cmd preserved).
+    """
+    payload = bytes(payload)
+    if not (0 <= int(cmd) <= 0xFF):
+        raise ValueError("MSP v1 cmd must fit in one byte")
+    if direction not in ("<", ">"):
+        raise ValueError("direction must be '<' or '>'")
+    if len(payload) > 0xFFFF:
+        raise ValueError("MSP v1 payload too large")
+    marker = b"!" if error else direction.encode("ascii")
+    if len(payload) >= MSP_V1_SIZE_LIMIT:
+        header = b"$M" + marker + bytes([MSP_V1_SIZE_LIMIT, int(cmd)]) + struct.pack("<H", len(payload))
+        checksum = 0
+        for byte in header[3:] + payload:
+            checksum ^= byte
+        return header + payload + bytes([checksum & 0xFF])
+    size = len(payload)
+    checksum = size ^ int(cmd)
+    for byte in payload:
+        checksum ^= byte
+    return b"$M" + marker + bytes([size, int(cmd)]) + payload + bytes([checksum & 0xFF])
+
+
+def build_frame_v2(cmd, payload=b"", direction="<", flags=0, error=False):
+    """Build a native MSP v2 frame ($X< / $X>). CRC covers flag+cmd+size+payload."""
+    payload = bytes(payload)
+    if not (0 <= int(cmd) <= 0xFFFF):
+        raise ValueError("MSP v2 cmd must fit in 16 bits")
+    if direction not in ("<", ">"):
+        raise ValueError("direction must be '<' or '>'")
+    if len(payload) > 0xFFFF:
+        raise ValueError("MSP v2 payload too large")
+    marker = b"!" if error else direction.encode("ascii")
+    header = b"$X" + marker + bytes([int(flags) & 0xFF]) + struct.pack("<HH", int(cmd), len(payload))
+    crc = crc8_dvb_s2(header[3:] + payload)
+    return header + payload + bytes([crc])
+
+
+def build_frame(cmd, payload=b"", is_v2=False, direction="<", error=False):
+    if is_v2:
+        return build_frame_v2(cmd, payload, direction=direction, error=error)
+    return build_frame_v1(cmd, payload, direction=direction, error=error)
+
+
+def decode_frame_bytes(data):
+    """Decode exactly one complete frame, or return None."""
+    parser = FrameParser()
+    frames = parser.feed(bytes(data))
+    return frames[0] if frames else None
+
+
+class FrameParser:
+    """Incremental MSP v1/v2 stream parser with CRC validation and resync.
+
+    Handles v1 jumbo responses, error frames ($M! / $X!), garbage between
+    frames, and partial frames split across reads.
+    """
+
+    MAX_BUFFER = 65536
+
+    def __init__(self):
+        self._buf = bytearray()
+        self.errors = 0
+
+    def reset(self):
+        self._buf.clear()
+
+    @property
+    def pending(self):
+        return bytes(self._buf)
+
+    def feed(self, data):
+        if data:
+            self._buf.extend(bytes(data))
+        frames = []
+        while self._buf:
+            result = self._parse_one()
+            if result is None:
+                break
+            frame, consumed, bad = result
+            del self._buf[:consumed]
+            if bad:
+                self.errors += 1
+                continue
+            frames.append(frame)
+        if len(self._buf) > self.MAX_BUFFER:
+            self._buf.clear()
+            self.errors += 1
+        return frames
+
+    def _parse_one(self):
+        """Return (frame, consumed, bad), or None when more bytes are needed."""
+        header_pos = -1
+        for candidate in (b"$M<", b"$M>", b"$M!", b"$X<", b"$X>", b"$X!"):
+            pos = self._buf.find(candidate)
+            if pos >= 0 and (header_pos < 0 or pos < header_pos):
+                header_pos = pos
+        if header_pos < 0:
+            # Keep a possible partial "$M"/"$X" prefix.
+            keep = 0
+            if len(self._buf) >= 2 and bytes(self._buf[-2:]) in (b"$M", b"$X"):
+                keep = 2
+            elif len(self._buf) >= 1 and self._buf[-1] == ord("$"):
+                keep = 1
+            drop = len(self._buf) - keep
+            if drop > 0:
+                return (None, drop, True)
+            return None
+        if header_pos > 0:
+            return (None, header_pos, True)
+
+        header = bytes(self._buf[:3])
+        is_v2 = header[1:2] == b"X"
+        direction = header[2:3].decode("ascii")
+        error = direction == "!"
+
+        if is_v2:
+            if len(self._buf) < 8:
+                return None
+            cmd = struct.unpack_from("<H", self._buf, 4)[0]
+            size = struct.unpack_from("<H", self._buf, 6)[0]
+            total = 9 + size
+            if len(self._buf) < total:
+                return None
+            if size > self.MAX_BUFFER:
+                return (None, 1, True)
+            crc = self._buf[8 + size]
+            calc = crc8_dvb_s2(self._buf[3:8 + size])
+            if crc != calc:
+                return (None, 1, True)
+            payload = bytes(self._buf[8:8 + size])
+            return (MspFrame(cmd, payload, True, direction, error), total, False)
+
+        if len(self._buf) < 5:
+            return None
+        size = self._buf[3]
+        cmd = self._buf[4]
+        if size == MSP_V1_SIZE_LIMIT:
+            if len(self._buf) < 7:
+                return None
+            real_size = struct.unpack_from("<H", self._buf, 5)[0]
+            if real_size < MSP_V1_SIZE_LIMIT:
+                return (None, 1, True)
+            total = 8 + real_size
+            if len(self._buf) < total:
+                return None
+            crc = self._buf[7 + real_size]
+            calc = 0
+            for byte in self._buf[3:7 + real_size]:
+                calc ^= byte
+            if crc != (calc & 0xFF):
+                return (None, 1, True)
+            payload = bytes(self._buf[7:7 + real_size])
+            return (MspFrame(cmd, payload, False, direction, error), total, False)
+        total = 6 + size
+        if len(self._buf) < total:
+            return None
+        crc = self._buf[5 + size]
+        calc = size ^ cmd
+        for byte in self._buf[5:5 + size]:
+            calc ^= byte
+        if crc != (calc & 0xFF):
+            return (None, 1, True)
+        payload = bytes(self._buf[5:5 + size])
+        return (MspFrame(cmd, payload, False, direction, error), total, False)
+
+
+# ---- payload decoders (pure) ------------------------------------------------
+
+def _u16(payload, off):
+    return struct.unpack_from("<H", payload, off)[0]
+
+
+def _i16(payload, off):
+    return struct.unpack_from("<h", payload, off)[0]
+
+
+def _u32(payload, off):
+    return struct.unpack_from("<I", payload, off)[0]
+
+
+def decode_attitude(payload):
+    """MSP_ATTITUDE -> (roll_deg, pitch_deg, yaw_deg).
+
+    roll/pitch are 0.1 deg, yaw is already whole degrees in the firmware
+    (DECIDEGREES_TO_DEGREES is applied before sbufWriteU16).  Do not divide
+    yaw by 10.  All three are int16 on the wire: yaw is signed (e.g. -14 for
+    heading 346), so reading it unsigned would turn -14 into 65522.
+    """
+    if payload is None or len(payload) < 6:
+        return None
+    roll_d10, pitch_d10, yaw_deg = struct.unpack_from("<hhh", payload, 0)
+    return (roll_d10 / 10.0, pitch_d10 / 10.0, float(yaw_deg))
+
+
+def decode_altitude(payload):
+    """MSP_ALTITUDE -> (altitude_m, vario_mps).  int32 cm + int16 cm/s.
+
+    Betaflight returns the u32 two's-complement of ``-1`` when the position
+    estimator has no valid altitude (for example USB-only, no battery/baro
+    lock).  Do not turn that sentinel into 42,949,672 m.
+    """
+    if payload is None or len(payload) < 6:
+        return None
+    # The MSP field is documented as u32, but Betaflight writes the signed
+    # estimate and uses -1 when the position estimator has no valid Z fix.
+    alt_cm = struct.unpack_from("<i", payload, 0)[0]
+    if alt_cm == -1:
+        return None
+    vario_cm_s = _i16(payload, 4)
+    return (alt_cm / 100.0, vario_cm_s / 100.0)
+
+
+def decode_analog(payload):
+    """MSP_ANALOG -> dict.
+
+    Current firmware (Betaflight 4.5+/sim2real) writes 9 bytes:
+        u8 legacy voltage (0.1V), u16 mAh, u16 RSSI,
+        int16 current (0.01A), u16 voltage (0.01V)
+    Older firmware writes 7 bytes:
+        u8 voltage (0.1V), int16 current (0.01A), u16 mAh, u16 RSSI
+    """
+    if payload is None or len(payload) < 7:
+        return None
+    if len(payload) >= 9:
+        return {
+            "layout": "v2-9b",
+            "voltage_v": _u16(payload, 7) / 100.0,
+            "voltage_legacy_v": payload[0] * 0.1,
+            "current_a": _i16(payload, 5) / 100.0,
+            "mah": _u16(payload, 1),
+            "rssi": _u16(payload, 3),
+        }
+    return {
+        "layout": "legacy-7b",
+        "voltage_v": payload[0] * 0.1,
+        "voltage_legacy_v": payload[0] * 0.1,
+        "current_a": _i16(payload, 1) / 100.0,
+        "mah": _u16(payload, 3),
+        "rssi": _u16(payload, 5),
+    }
+
+
+def decode_status(payload):
+    """MSP_STATUS -> dict. flightModeFlags live at offset 6; bit0 == ARMED."""
+    if payload is None or len(payload) < 10:
+        return None
+    flags = _u32(payload, 6)
+    return {
+        "cycle_time": _u16(payload, 0),
+        "i2c_errors": _u16(payload, 2),
+        "sensors": _u16(payload, 4),
+        "flight_mode_flags": flags,
+        "armed": bool(flags & 1),
+        "profile": payload[10] if len(payload) > 10 else None,
+    }
+
+
+def decode_status_ex(payload):
+    """MSP_STATUS_EX -> dict.
+
+    Layout (Betaflight 4.3+ / sim2real):
+      [0:15]  fixed header (flightModeFlags u32 at offset 6)
+      [15]    u8 byteCount (low 4 bits): number of extra flight-mode bytes
+      [16]    byteCount bytes
+      [..]    u8 armingFlagCount
+      [..]    u32 armingDisableFlags
+      [..]    u8 configState
+      [..]    u16 core temperature (API >= 1.46)
+
+    The arming flags MUST be reached by walking byteCount, never a fixed
+    offset: byteCount is 0 today but grows when flightModeFlags are extended.
+    """
+    base = decode_status(payload)
+    if base is None:
+        return None
+    base.update({
+        "extended_flight_mode_flags": b"",
+        "arming_flag_count": None,
+        "arming_flags": None,
+        "config_state": None,
+        "cpu_temp_c": None,
+    })
+    if payload is None or len(payload) < 16:
+        return base
+    off = 15
+    byte_count = payload[off] & 0x0F
+    off += 1
+    if off + byte_count > len(payload):
+        return base
+    base["extended_flight_mode_flags"] = bytes(payload[off:off + byte_count])
+    off += byte_count
+    if off >= len(payload):
+        return base
+    base["arming_flag_count"] = payload[off]
+    off += 1
+    remaining = len(payload) - off
+    if remaining >= 4:
+        base["arming_flags"] = _u32(payload, off)
+        off += 4
+    elif remaining > 0:
+        base["arming_flags"] = int.from_bytes(payload[off:off + remaining], "little")
+        off = len(payload)
+    if off < len(payload):
+        base["config_state"] = payload[off]
+        off += 1
+    if off + 2 <= len(payload):
+        base["cpu_temp_c"] = float(_u16(payload, off))
+    return base
+
+
+def decode_rc(payload, max_channels=16):
+    """MSP_RC -> tuple in AETR order (firmware order is R,P,Y,T,AUX1...)."""
+    if payload is None or len(payload) < 8:
+        return None
+    count = min(len(payload) // 2, int(max_channels))
+    channels = list(struct.unpack_from("<%dH" % count, payload, 0))
+    if count >= 4:
+        channels[2], channels[3] = channels[3], channels[2]
+    return tuple(channels)
+
+
+def decode_board_info(payload):
+    """MSP_BOARD_INFO -> dict (first fields; v1.42+ tail tolerated)."""
+    if payload is None or len(payload) < 8:
+        return None
+
+    def pstring(off):
+        if off >= len(payload):
+            return "", off
+        length = payload[off]
+        start = off + 1
+        return bytes(payload[start:start + length]).decode("ascii", "replace"), start + length
+
+    board_identifier = bytes(payload[0:4]).decode("ascii", "replace")
+    info = {
+        "board_identifier": board_identifier,
+        "hardware_revision": _u16(payload, 4),
+        "board_type": payload[6],
+        "target_capabilities": payload[7],
+    }
+    off = 8
+    info["target_name"], off = pstring(off)
+    info["board_name"], off = pstring(off)
+    info["manufacturer_id"], off = pstring(off)
+    return info
+
+
+def decode_boxnames(payload):
+    """MSP_BOXNAMES -> list of box names (semicolon separated, page-limited)."""
+    if not payload:
+        return []
+    text = bytes(payload).decode("ascii", "replace").replace("\x00", "")
+    return [name for name in text.split(";") if name]
+
+
+def decode_boxids(payload):
+    """MSP_BOXIDS -> list of permanent IDs (one byte each, same order as names)."""
+    if not payload:
+        return []
+    return list(bytes(payload))
+
+
+def decode_mode_ranges(payload):
+    """MSP_MODE_RANGES -> list of raw 4-byte records.
+
+    On current Betaflight the first byte is the box permanent ID; older
+    firmware wrote the box index.  start_pwm/end_pwm convert the step fields:
+    PWM = 900 + step * 25.  valid is False for unused slots.
+    """
+    if not payload:
+        return []
+    ranges = []
+    for off in range(0, len(payload) - 3, 4):
+        box_id, aux_index, start_step, end_step = payload[off:off + 4]
+        ranges.append({
+            "box_id": box_id,
+            "aux_index": aux_index,
+            "start_step": start_step,
+            "end_step": end_step,
+            "start_pwm": 900 + 25 * start_step,
+            "end_pwm": 900 + 25 * end_step,
+            "valid": start_step < end_step,
+            "channel_index": 4 + aux_index,
+        })
+    return ranges
+
+
+def decode_motor(payload, max_motors=8):
+    """MSP_MOTOR -> tuple of motor outputs (u16 PWM-like units)."""
+    if not payload:
+        return None
+    count = min(len(payload) // 2, int(max_motors))
+    if count <= 0:
+        return None
+    return tuple(struct.unpack_from("<%dH" % count, payload, 0))
+
+
+def decode_msp2_position_state(payload):
+    """MSP2 0x3015 (sim2real firmware) -> offboard state.
+
+    Layout: u8 offboardActive, u8 reached, u8 velocityActive,
+            float32 posM[3] at offset 3 (ENU, metres),
+            float32 velMps[3] at offset 15 (ENU, m/s),
+            float32 targetVelMps[3] at offset 27.
+    """
+    if payload is None or len(payload) < 27:
+        return None
+    state = {
+        "offboard_active": bool(payload[0]),
+        "reached": bool(payload[1]),
+        "velocity_active": bool(payload[2]),
+        "position_enu": struct.unpack_from("<fff", payload, 3),
+        "velocity_enu": struct.unpack_from("<fff", payload, 15),
+        "target_velocity_enu": (struct.unpack_from("<fff", payload, 27)
+                                if len(payload) >= 39 else None),
+    }
+    return state
+
+
+# Arming disable flags for the sim2real firmware branch.  The public
+# ARMING_FLAG_NAMES above is frozen for the BF 4.5 tooling/tests; the board on
+# the Pi5 may run either layout, so callers should report the raw u32 as well.
+ARMING_FLAG_NAMES_SIM2REAL = dict(ARMING_FLAG_NAMES)
+ARMING_FLAG_NAMES_SIM2REAL.pop(25, None)
+ARMING_FLAG_NAMES_SIM2REAL.update({
+    25: "CRASHFLIP",
+    26: "ALTHOLD",
+    27: "POSHOLD",
+    28: "ARM_SWITCH",
+})
+
+ARMING_FLAG_LAYOUTS = {
+    "bf4.5": ARMING_FLAG_NAMES,
+    "sim2real": ARMING_FLAG_NAMES_SIM2REAL,
+}
+
+
+def decode_arming_flags(value, layout="bf4.5"):
+    """u32 armingDisableFlags -> list of names for the given firmware layout."""
+    names = ARMING_FLAG_LAYOUTS.get(layout, ARMING_FLAG_NAMES)
+    return [name for bit, name in sorted(names.items()) if int(value) & (1 << bit)]
+
+
+def decode_motor_channels(channels):
+    """Normalise an 8/16 channel RC sequence to a 16-u16 payload (clamped)."""
+    values = [max(1000, min(2000, int(v))) for v in channels]
+    if len(values) > 16:
+        raise ValueError("at most 16 RC channels")
+    values.extend([1500] * (16 - len(values)))
+    return tuple(values)
 
 
 # ---- 诊断 / 控制函数 ---------------------------------------------------------

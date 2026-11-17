@@ -1,0 +1,52 @@
+[Unit]
+# BF_Anti onboard runtime on the Raspberry Pi 5.
+# The install script renders __INSTALL_DIR__ and __BOARD_USER__:
+#   sudo bash scripts/pi5_install.sh
+Description=BF_Anti onboard runtime (camera, OSD, FB, FC link)
+Documentation=file://__INSTALL_DIR__/README.md
+After=local-fs.target
+Wants=network-online.target
+After=network-online.target
+# Do NOT order on dev-fb0.device: systemd can create a device job that never
+# activates for the framebuffer, which blocks the service indefinitely.  The
+# runtime opens fb0/video/FC lazily and retries internally, so no device
+# ordering is required.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Board account; must be in the video group for /dev/fb0 and /dev/video*.
+User=pi5
+SupplementaryGroups=video dialout
+WorkingDirectory=__INSTALL_DIR__
+# Optional overrides: BF_ANTI_HOME / BF_ANTI_VENV / BF_ANTI_CONFIG.
+EnvironmentFile=-/etc/bf-anti/onboard.env
+Environment=PYTHONUNBUFFERED=1
+# There is no X11 on the aircraft; never let OpenCV try a GUI backend.
+Environment=DISPLAY=
+Environment=OPENCV_VIDEOIO_PRIORITY_V4L2=1
+ExecStart=__INSTALL_DIR__/scripts/pi5_run_onboard.sh --config __INSTALL_DIR__/config/onboard.json
+
+# Restart only on failure. A clean SIGTERM stop (pilot disarm / maintenance)
+# must stay stopped instead of coming back up on its own.
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=20
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# Light hardening; the runtime still needs /dev/fb0, /dev/hailo0,
+# /dev/video* and /dev/ttyACM0, so devices and /home stay accessible.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

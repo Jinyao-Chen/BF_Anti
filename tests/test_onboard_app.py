@@ -1,0 +1,156 @@
+"""Onboard app wiring: fakes for FC/camera/detector/mux/video."""
+import time
+
+from onboard.app import OnboardApp
+from onboard.config import load_config
+from onboard.safety import SafetyDecision
+from onboard.types import Detection, FcState
+
+
+class FakeState:
+    def __init__(self, state):
+        self._state = state
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def snapshot(self, now=None):
+        return self._state
+
+    def rc_snapshot(self):
+        return (self._state.rc, 0.0)
+
+
+class FakeDetector:
+    def __init__(self, detection=None):
+        self.detection = detection
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def latest(self, max_age_s, now=None):
+        return self.detection
+
+    def healthy(self, now):
+        return True
+
+
+class FakeCamera:
+    def __init__(self):
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def latest(self, max_age_s, now=None):
+        return None, 0.0
+
+
+class FakeMux:
+    def __init__(self):
+        self.cmds = []
+        self.on_engage = None
+        self.on_disengage = None
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
+
+    def publish_cmd(self, cmd):
+        self.cmds.append(cmd)
+
+
+class FakeVideo:
+    def __init__(self):
+        self.submits = 0
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def submit(self, *args):
+        self.submits += 1
+
+
+def fresh_state(now):
+    return FcState(
+        altitude_m=10.0,
+        vario_mps=0.0,
+        rpy_deg=(0.0, 0.0, 0.0),
+        rc=(1500, 1500, 1500, 1500, 2000, 2000, 2000, 2000) + (1500,) * 8,
+        armed=True,
+        att_t=now,
+        alt_t=now,
+        rc_t=now,
+        status_t=now,
+        link_t=now,
+    )
+
+
+def build_app(detection=None, state=None):
+    cfg = load_config("config/onboard.example.json")
+    now = time.monotonic()
+    st = state or fresh_state(now)
+    fake_state = FakeState(st)
+    fake_det = FakeDetector(detection)
+    fake_mux = FakeMux()
+    fake_video = FakeVideo()
+    app = OnboardApp(
+        cfg, link=object(), state=fake_state, detector=fake_det,
+        camera=FakeCamera(), mux=fake_mux, video=fake_video,
+    )
+    return app, fake_mux, fake_video, now
+
+
+def test_step_once_publishes_none_without_target():
+    app, mux, video, now = build_app()
+    out, decision = app.step_once(now)
+    assert out.channels is None
+    assert mux.cmds and mux.cmds[-1] is None
+    assert isinstance(decision, SafetyDecision)
+    assert video.submits == 1
+
+
+def test_engaged_with_confirmed_target_publishes_track_cmd():
+    now = time.monotonic()
+    det = Detection((600.0, 320.0, 680.0, 400.0), 0.9, t=now)
+    app, mux, _, _ = build_app(det, state=fresh_state(now))
+    app._engaged = True
+    app.step_once(now)
+    out, decision = app.step_once(now + 0.02)
+    assert out.confirmed and out.channels is not None
+    assert decision.allow_auto, decision.reason
+    cmd = mux.cmds[-1]
+    assert cmd is not None
+    assert 1000 <= cmd.throttle <= 2000
+    assert 1000 <= cmd.roll <= 2000
+
+
+def test_stale_rc_immediately_closes_gate():
+    now = time.monotonic()
+    det = Detection((600.0, 320.0, 680.0, 400.0), 0.9, t=now)
+    st = fresh_state(now)
+    st.rc_t = now - 2.0
+    app, mux, _, _ = build_app(det, state=st)
+    app._engaged = True
+    app.step_once(now)
+    out, decision = app.step_once(now + 0.02)
+    assert not decision.allow_auto
+    assert decision.critical
+    assert mux.cmds[-1] is None

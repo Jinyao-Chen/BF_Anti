@@ -1,12 +1,13 @@
-# tests/ —— 单元测试（153 项）
+# tests/ —— 单元测试（350 项）
 
 ```bash
 python3 -m pytest -q                                          # 全量
 python3 -m pytest -q tests/test_p_visual_guidance.py           # 只跑控制律
 ```
 
-约定：`testpaths = tests`（见 [../pytest.ini](../pytest.ini)）；测试以**裸名**导入仓库根模块
-（`crsf` / `msp` / `rc_mux` / `tracking_controller`）与**包名**导入 `guidance.*` / `perception.*` / `modeling.*`。
+约定：`testpaths = tests`（见 [../pytest.ini](../pytest.ini)）；活跃测试以**裸名**导入根模块
+`msp` / `rc_mux`，或**包名**导入 `guidance.*` / `perception.*` / `modeling.*` / `onboard.*`。
+旧 X5 模块的测试显式导入 `legacy.rdk_x5_pico.*`，不再污染根路径。
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -14,8 +15,8 @@ python3 -m pytest -q tests/test_p_visual_guidance.py           # 只跑控制律
 | `test_p_strike_kinematic.py` | 制导-控制运动学包线（含"目标高于本机 25 m"等阻塞工况） |
 | `test_bbox_tracker.py` | 仿真检测框跟踪（确认帧、外推、门控、fresh 语义） |
 | `test_camera_geometry.py` / `test_target_estimator.py` | 相机几何与目标状态估计 |
-| `test_rc_mux.py` / `test_crsf.py` / `test_msp_flags.py` | RC 融合、CRSF 解码、MSP 状态位 |
-| `test_tracking_controller.py` | 机载 PBVS 伺服 / 状态机 / PID |
+| `test_rc_mux.py` / `test_crsf.py` / `test_msp_flags.py` | RC 融合、legacy CRSF 解码、MSP 状态位 |
+| `test_tracking_controller.py` | legacy X5 PBVS 伺服 / 状态机 / PID（导入 legacy.rdk_x5_pico） |
 | `test_track_cmd_adapter.py` | 制导输出 -> `rc_mux.TrackCmd` 适配 |
 | `test_theory_model.py` / `test_coupled_altitude.py` / `test_altitude_diagnostics.py` | 理论模型、高度环、掉高诊断 |
 | `test_hover_throttle.py` / `test_lift_loss.py` / `test_firmware_params.py` | 悬停油门、掉升力辨识、固件参数一致性 |

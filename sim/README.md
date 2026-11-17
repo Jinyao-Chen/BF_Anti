@@ -34,7 +34,7 @@ python3 sim/run_p_vision_strike.py --synthetic --duration 30 --log /tmp/kin.csv
 | `trial_p_strike.sh` | 无头单发试验 + 统计（`sim/trial_<名>.out`/`.csv`） | `YOLO_PORT`/`DUMP_DIR`/`DUMP_HZ` 可注入；后端不通会 ABORT 而不是产生假脱靶 |
 | `launch_sitl.sh` | 启动 Betaflight SITL + Gazebo | `BF_ANTI_WORLD` 选世界，`--headless` 无界面 |
 | `sim_restart.sh` | 安全重启仿真（避免 `pkill` 命中调用者自身） | 每次试验前必跑 |
-| `yolo_server_board.py` | RDK X5 板端检测服务（协议与 GPU 版一致） | 部署见本地文档 `docs/interception/2026-10-01-x5-as-inference-server.md`（未纳入版本控制） |
+| `legacy/rdk_x5_pico/scripts/yolo_server_board.py` | RDK X5 板端检测服务（已归档） | 部署见 `docs/archive/2026-10-x5-pico/2026-10-01-x5-as-inference-server.md`；Pi5 主线不用 |
 | `eval_detector_frames.py` | **换检测模型必跑**：在落盘的原始帧上对比两个模型的召回/置信度/框宽 | 输出隐含 `W_eff` -> 决定 `--target-width` |
 
 早期阶段的运行器仍在（`run_visual_strike*.py`、`run_intercept_mission.py`、`run_xy_velocity_test.py`、

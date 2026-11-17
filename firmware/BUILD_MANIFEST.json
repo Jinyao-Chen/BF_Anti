@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-10-17T23:12:14+08:00",
+  "bf_anti": {
+    "repo": ".",
+    "branch": "sim2real/pi5-2026-10",
+    "commit": "698f899",
+    "tag": "baseline-2026-10-17",
+    "pytest": "346 passed"
+  },
+  "firmware": {
+    "repo": "../betaflight",
+    "branch": "sim2real/2026-10-17",
+    "commit": "5ce40b7691",
+    "tag": "sim2real-2026-10-17",
+    "base": "release260904",
+    "base_commit": "44482a4c7f59507b849c8a475d9b92b9af78daec",
+    "worktree": "/tmp/bf_sim2real",
+    "release260904_untouched": true
+  },
+  "sitl": {
+    "target": "SITL_GAZEBO",
+    "build_command": "make CONFIG=SITL_GAZEBO -j8",
+    "elf": "../betaflight/obj/main/betaflight_SITL_SITL_GAZEBO.elf",
+    "elf_sha256": "90306d2b81bfff90676289ad4b705fcdaa1448a8ab502ceae6d6b74211f364a2",
+    "elf_mtime": "2026-10-17T23:35:42+08:00",
+    "build_status": "forced clean rebuild (make -B) succeeded; text=405863 data=23790 bss=79504"
+  },
+  "hardware": {
+    "fc_board": "UNKNOWN - read MSP_BOARD_INFO when connected",
+    "target": "TBD - do not flash until identifier matches",
+    "camera": "NOT CONNECTED",
+    "vtx_goggles": "PAL analog 5.8 GHz (J7 verified by user)",
+    "hailo": "Hailo-8L 13 TOPS, HailoRT 4.23.0, firmware 4.23.0"
+  },
+  "gates": {
+    "phase0": "PASS",
+    "phase1_platform": "PASS except camera absent",
+    "phase2_hef": "BLOCKED - DFC 3.33.0 not installed",
+    "phase4_firmware_flash": "BLOCKED - FC board/target unknown",
+    "phase4_motor_ab": "BLOCKED - FC not connected",
+    "phase6_flight": "BLOCKED - hardware/site not ready"
+  }
+}

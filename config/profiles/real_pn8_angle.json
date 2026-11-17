@@ -1,0 +1,61 @@
+{
+  "guidance": {
+    "params": {
+      "kp_yaw": 220,
+      "kp_roll": 45,
+      "kp_pitch": 13,
+      "kp_z": 1,
+      "kp_vz": 250,
+      "vz_max_mps": 8,
+      "kp_speed": 8,
+      "v_max_mps": 10,
+      "vmax_close_range_m": 15,
+      "vmax_close_floor_mps": 4,
+      "hover_pwm": 1430,
+      "max_roll_deg": 30,
+      "max_pitch_up_deg": 25,
+      "max_pitch_down_deg": 50,
+      "max_yaw_rate_dps": 300,
+      "thr_min_pwm": 1400,
+      "thr_max_pwm": 1950,
+      "target_width_m": 0.55,
+      "range_max_m": 150,
+      "hit_range_m": 0.8,
+      "terminal_range_m": 3,
+      "lost_timeout_s": 0.9,
+      "min_alt_guard_m": 3,
+      "closing_fit_n": 8,
+      "closing_max_mps": 25,
+      "range_lpf_tau_s": 0.25,
+      "range_lpf_min_range_m": 12,
+      "pn_gain": 8,
+      "pn_roll_cap_deg": 15,
+      "pn_rate_lpf_s": 0.35,
+      "pn_vc_min_mps": 2,
+      "pn_vc_max_mps": 12,
+      "pn_min_speed_mps": 2.5,
+      "speed_source": "closing",
+      "kp_velalign": 0,
+      "align_gate": 0.15,
+      "align_pitch_limit_deg": 18,
+      "align_gate_lpf_s": 0.15,
+      "err_soft": 0.35,
+      "vz_time_to_go": true,
+      "climb_along_los": false,
+      "ki_z": 0,
+      "ki_pitch": 0,
+      "ki_roll": 0
+    }
+  },
+  "safety": {
+    "min_altitude_m": 2,
+    "max_altitude_m": 60,
+    "max_range_m": 80
+  },
+  "control": {
+    "att_mode": "angle",
+    "hover_throttle": 1430,
+    "angle_limit_deg": 60,
+    "yaw_full_rate_dps": 300
+  }
+}

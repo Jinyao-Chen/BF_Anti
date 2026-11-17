@@ -1,19 +1,121 @@
-# BF_Anti — 反无人机 YOLO 检测 + Betaflight MSP 飞控
+# BF_Anti — 反无人机视觉制导 + Betaflight MSP 飞控
 
-[![Betaflight](https://img.shields.io/badge/Betaflight-4.5.3-00A6FF)](https://github.com/betaflight/betaflight)
+[![Pi 5](https://img.shields.io/badge/Raspberry%20Pi-5%204GB-C51A4A)](https://www.raspberrypi.com/products/raspberry-pi-5/)
+[![Hailo](https://img.shields.io/badge/AI%20HAT%2B-Hailo--8L%2013TOPS-00A6FF)](https://hailo.ai/)
+[![Betaflight](https://img.shields.io/badge/Betaflight-release260904%20%2B%20SITL-00A6FF)](https://github.com/betaflight/betaflight)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-FFB300)](https://github.com/ultralytics/ultralytics)
-[![RDK X5](https://img.shields.io/badge/RDK-X5%20Sunrise%205-10TOPS-00C853)](https://d-robotics.github.io/rdk_doc/)
-[![RP2040](https://img.shields.io/badge/Pico-RP2040-FF69B4)](https://www.raspberrypi.com/products/raspberry-pi-pico/)
 
-> 基于地平线 RDK X5 (Sunrise 5, 10 TOPS) 的实时反无人机检测系统。
-> USB 相机 → YOLO BPU 推理 → 目标追踪 → PBVS 视觉伺服 → MSP 飞控控制。
+> **当前主线：Raspberry Pi 5 4GB + AI HAT+ Hailo-8L (13 TOPS)**。
+> USB 相机 → Hailo YOLOv8 → 跟踪/纯 P 制导 → MSP 覆盖 RPYT → Betaflight；
+> J7 复合视频 (720x576i PAL) 直接进 VTX/眼镜，不走 HDMI 转换器。
+> 旧的 RDK X5 + Pico 链路保留在仓库中作参考，见 §旧版 RDK X5 链路。
 
-仓库里有**两条链路**，别混淆：
+仓库里有三条链路，别混淆：
 
 | 链路 | 跑在哪 | 入口 | 说明 |
 |------|--------|------|------|
-| **机载链路** | RDK X5 + Betaflight FC | [`detect.py`](detect.py) / [`run_detect.sh`](run_detect.sh) | 本文档 §架构 起介绍；BPU `.bin` 推理 + MSP 覆盖 RC |
-| **仿真链路** | PC + Gazebo SITL | [`sim/run_p_vision_strike.py`](sim/run_p_vision_strike.py) | 纯 P 视觉制导打击，见 §纯 P 视觉制导打击 与 [`sim/README.md`](sim/README.md) |
+| **Pi5 机载（主线）** | Pi 5 + Hailo-8L + Betaflight FC | [`onboard/app.py`](onboard/app.py) | 相机/检测/制导/OSD/图传；相机已接、FC 未接；DFC 已本地安装，见 §Pi5 机载（sim2real） |
+| **SITL 仿真** | PC + Gazebo Harmonic + Betaflight SITL | [`sim/run_p_vision_strike.py`](sim/run_p_vision_strike.py) | 纯 P 视觉制导打击，见 §纯 P 视觉制导打击 与 [`sim/README.md`](sim/README.md) |
+| **旧版 RDK X5** | RDK X5 + Pico | [`detect.py`](legacy/rdk_x5_pico/detect.py) / [`run_detect.sh`](legacy/rdk_x5_pico/run_detect.sh) | BPU .bin 推理 + SPI PAL；已归档到 legacy/rdk_x5_pico/ |
+
+---
+
+## Pi5 机载（sim2real）
+
+### 目标硬件
+
+| 组件 | 当前选择 | 状态 |
+|---|---|---|
+| 机载电脑 | Raspberry Pi 5 Model B 4GB | 已实测 |
+| NPU | AI HAT+ Hailo-8L 13 TOPS (HAILO8L) | 已实测，HailoRT 4.23.0 |
+| 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已接；实际约 25 fps；相机已放平，rotate_deg=0；FOV/tilt 待标定 |
+| 飞控 | Betaflight 4.5.3, S405 / OMNIBUSF4SD | **已接** USB `/dev/ttyACM0`；MSP override 已配置；当前 `RX_MSP`（无 CRSF 串行接收机）、`RX_FAILSAFE`、电池未接 |
+| 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；目视未验 |
+| 模型 | YOLOv8n 1-class drone -> Hailo HEF | **128 帧真实相机校准 HEF 已在 Pi5 parse/run**；bench p50 16.21 ms，61.7 fps |
+
+### 数据流
+
+~~~text
+USB UVC 1280x720 MJPG
+  -> CameraSource (latest-frame, no X11)
+  -> HailoDetector (YOLOv8, 640x640, async)
+  -> BboxTracker (confirm/gate/coast)
+  -> SafetySupervisor (ARM/AUX freshness/altitude/loop)
+  -> PVisualGuidance (P + PN, closing speed source)
+  -> RCMux (single MSP RC writer, 50 Hz)
+  -> Betaflight (ARM + ANGLE + BOXMSPOVERRIDE)
+  -> MSP telemetry (ATTITUDE/ALTITUDE/STATUS/RC/ANALOG)
+  -> OSD -> /dev/fb0 (720x576 BGRA) -> J7 -> VTX -> goggles
+~~~
+
+### 关键约束
+
+- 飞手拥有 ARM / ANGLE / BOXMSPOVERRIDE / 切入开关；伴机只写 RPYT，**绝不命令 AUX/ARM**。
+- 任何 RC/姿态/高度/链路过期、回路超时、目标丢失、低电量/高度/距离越界 → 立即回 PASSTHROUGH；
+  关键故障锁存，需飞手把切入开关回低再重新进入。
+- 第一版真机只用 ANGLE + BOXMSPOVERRIDE + 伴机 RPYT + 直接油门；
+  不用 ALT_HOLD / POS_HOLD / offboard / GPS rescue。
+- 无 GPS/光流：制导用 speed_source=closing，水平位置/速度不参与；高度用 MSP_ALTITUDE。
+- 相机 tilt/yaw、FC 板卡、AUX 映射、电池阈值必须实测后写入 config/onboard.json；不要猜。
+
+### 快速命令
+
+~~~bash
+# 本机单测（当前 350 项）
+python3 -m pytest -q
+
+# 协议自检（离线 / SITL TCP / 真机串口）
+python3 tools/protocol_conformance.py --offline
+python3 tools/protocol_conformance.py --host 127.0.0.1 --tcp-port 5761
+
+# Pi5 只读体检 + 部署（在 Pi 上运行 install）
+bash scripts/pi5_bringup.sh --root /home/pi5/BF_Anti
+sudo bash scripts/pi5_install.sh
+python3 -m onboard.app --config config/onboard.json
+
+# 实时 OSD 网页（Pi 上另开进程；本机浏览器打开 http://<Pi-IP>:8088/）
+.venv/bin/python scripts/pi5_osd_stream.py --fb /dev/fb0 --port 8088
+
+# FC 姿态符号检查（只读；Pi 上跑，本机用 SSH 隧道看）
+.venv/bin/python scripts/fc_attitude_viewer.py --port /dev/ttyACM0 --http-port 8090
+# 本机：ssh -N -L 8090:127.0.0.1:8090 pi5@10.42.0.228
+# 浏览器：http://127.0.0.1:8090/
+
+# Hailo 工具
+python3 tools/hailo/check_env.py --role pi5
+python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef --frames 300
+~~~
+
+### 硬件与证据边界
+
+- 已实测：Pi5 J7 PAL 720x576i、fb0 BGRA 写入、HailoRT 4.23 + HAILO8L 识别、
+  预编译 yolov8s HEF 100 帧、OSD+DisplayPipeline 25 FPS/6.5 ms 渲染、SITL MSP 协议 12 项通过。
+- 相机已接：/dev/video0（05a3:9230）MJPG 1280x720，CSV 实测约 25 fps；CameraSource rotate_deg=0
+  后输出 1280x720，HailoDetector 约 51 fps、单帧推理约 19.4 ms，0 errors。
+- 自编 HEF 已在 Pi5 验证：hailortcli parse-hef 显示 HAILO8L + 1-class NMS；hailortcli run
+  100 帧 HW Latency 14.89 ms，芯片 31.3 C。
+- 已用真实 Pi 相机帧生成 128 帧校准集（100% real_pi_camera），自编 HEF 在 Pi5 parse/run：
+  parse-hef HAILO8L + 1-class NMS；bench 200 帧 p50 16.21 ms、p95 16.26 ms、61.7 infer fps。
+  OSD 实测截图见 `build/camera_local/fb0_pi128.png`；当前场景墙面出现 0.31 的框，属未验证/疑似
+  误报，不作为精度结论。
+- FC 已接入并完成只读+配置检查：S405/OMNIBUSF4SD，Betaflight 4.5.3，`/dev/ttyACM0`；
+  `msp_override_channels_mask=15`、`msp_override_failsafe=ON`，AUX1=ARM、AUX2=ANGLE、AUX3=MSP OVERRIDE；
+  16 通道 RC round-trip max diff 0，协议 12 pass / 0 fail（attitude_sign 仍需实机倾斜，MSP2 position 不支持）。
+- 但 FC 当前 `feature` 是 **RX_MSP**（`RX_SERIAL` 关闭），三路 UART 都没有 serial RX；`serialrx_provider=CRSF`
+  只是未生效的配置。RC round-trip 验证的是 MSP 输入，不是飞手 CRSF 接收机。
+- 手动姿态测试：ROLL + = 右翼下压、YAW 向左减小；PITCH 的 Betaflight 原始符号是 + = 低头，
+  已在 `onboard/fc/state.py` 转为 + = 抬头，OSD/guidance 使用航空约定。
+- 当前 FC 仍报 `RX_FAILSAFE`，且 `0S battery - NOT PRESENT`；接收机/电池/拆桨电机 A/B/飞行未验。
+- 未实测（阻塞）：CRSF 接收机接入与 UART 配置、飞手 ARM/ANGLE/OVERRIDE 独立开关、拆桨电机 A/B、
+  目标检测精度、1024 帧校准、J7 目视、飞行。不要把这些写成已通过。
+
+---
+
+## 旧版 RDK X5 链路
+
+> 以下 §架构/§硬件/§配置/§使用方法 描述的是已归档的 RDK X5 + Pico 链路，
+> 代码在 [legacy/rdk_x5_pico/](legacy/rdk_x5_pico/README.md)，图上文件名仅作历史示意。
+> 新工作请从上面的 Pi5 主线开始。
 
 ---
 
@@ -73,33 +175,30 @@ USB 相机 ──▶ RDK X5 ── BPU 推理 ── YOLO 检测框
 
 ```
 BF_Anti/
-├── detect.py                 主程序: YOLO 检测 + 追踪 + MSP 控制
-├── tracker.py                中心距离目标追踪 (EMA 平滑 + 轨迹)
-├── tracking_controller.py    PBVS 视觉伺服 + 状态机 + PID 控制 (纯计算)
+├── onboard/                  Pi5 机载主线: app/camera/controller/safety/fc/detector/video
+├── config/                   onboard.example.json + profiles/*.json
+├── tools/                    protocol_conformance / fw_motor_ab / hailo/*
+├── systemd/                  bf-anti-onboard.service
+├── legacy/rdk_x5_pico/       旧版 X5 + Pico 链路（已归档，见 legacy/README.md）
+│   ├── detect.py / tracker.py / tracking_controller.py
+│   ├── video.py / pico_fw/    PAL -> SPI -> Pico（旧图传）
+│   ├── crsf.py / motors.py / run_detect.sh
+│   ├── scripts/               X5 pinmux / GPIO / USB camera / 旧 service
+│   └── model/*.bin            X5 BPU 模型
 ├── rc_mux.py                 RC 融合层 (50Hz, 透传/替换)
-├── crsf.py                   CRSF 协议解码 + CRC8 校验
 ├── msp.py                    Betaflight MSP 协议驱动 (USB VCP)
-├── video.py                  PAL 视频帧编码 → SPI → Pico
-├── motors.py                 安全电机测试 (油门 1050→1100)
-├── run_detect.sh             一键启动脚本 (bench/track/fly)
-├── model/                    检测模型（.onnx 仿真 / .bin 上板）
+├── model/                    检测模型（ONNX 仿真/Hailo 源；X5 .bin 已归档）
 ├── guidance/                 制导律（主线 p_visual_guidance.py）+ XY 速度外环
 ├── perception/               相机几何 / 目标估计 / 3D KF
 ├── modeling/                 理论模型与整定（四旋翼、高度环、PID）
-├── sim/                      Gazebo SITL 仿真工作区 → 见 sim/README.md
+├── sim/                      Gazebo SITL 仿真工作区 -> 见 sim/README.md
 ├── docs/                     文档（本地保留、未纳入版本控制；见 .gitignore）
-├── pico_fw/                  Pico 协处理器固件 (C + PIO 汇编)
-├── tests/                    单元测试（153 项）
+├── tests/                    单元测试（350 项）
 └── scripts/
-    ├── test_msp_override.py  BOXMSPOVERRIDE 地面测试
-    ├── rc_monitor.py         RC 通道实时监控
-    ├── crsf_monitor.py       CRSF 串口数据监控
-    ├── bf_anti.service       systemd 自启服务
-    ├── service_ctl.sh        服务管理脚本
-    ├── hw_test.py            SPI 硬件链路诊断
-    ├── gpio_probe.py         GPIO 探测工具
-    ├── usb_camera_probe.py   USB 摄像头能力探测
-    └── usb_camera_test_gst.py GStreamer 摄像头测试
+    ├── pi5_bringup.sh / pi5_install.sh / pi5_run_onboard.sh
+    ├── pi5_composite_check.sh / pi5_camera_probe.py
+    ├── fc_identify.py / rc_monitor.py / test_msp_override.py
+    └── legacy 脚本已移到 legacy/rdk_x5_pico/scripts/
 ```
 
 ---
@@ -115,7 +214,7 @@ ln -s ~/rdk_model_zoo ~/BF_Anti/rdk_model_zoo
 pip3 install pyserial numpy opencv-python
 
 # 开机自启
-cd ~/BF_Anti && ./scripts/service_ctl.sh install
+cd ~/BF_Anti && ./legacy/rdk_x5_pico/scripts/service_ctl.sh install
 ```
 
 ---
@@ -165,17 +264,17 @@ X5 USB     → 飞控 USB
 ### 基准检测 (无追踪)
 
 ```bash
-./run_detect.sh bench
+./legacy/rdk_x5_pico/run_detect.sh bench
 ```
 
 ### 追踪测试
 
 ```bash
 # 地面追踪 (base_throttle=1100)
-./run_detect.sh track
+./legacy/rdk_x5_pico/run_detect.sh track
 
 # 飞行追踪 (base_throttle=1550)
-./run_detect.sh fly
+./legacy/rdk_x5_pico/run_detect.sh fly
 ```
 
 ### MSP 控制命令
@@ -269,7 +368,7 @@ Gazebo/Betaflight SITL 下的**纯比例（P-only）视觉制导**打击闭环�
 稳定性根因与修复 · 检测后端实测对比。
 
 ```bash
-# 单元测试（纯 P 契约 + 运动学回归，共 153 项）
+# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 350 项）
 python3 -m pytest -q
 
 # 运动学包线：静态/径向目标命中，横向匀速目标记录滞后
@@ -290,7 +389,7 @@ YOLO_PORT=9301 ./sim/trial_p_strike.sh b_onnx --target-width 2.38   # 无头单�
 
 核心文件：[`guidance/p_visual_guidance.py`](guidance/p_visual_guidance.py)（制导律）、
 [`sim/run_p_vision_strike.py`](sim/run_p_vision_strike.py)（闭环 runner）、
-[`sim/bbox_tracker.py`](sim/bbox_tracker.py)（检测框跟踪）、
+[`perception/bbox_tracker.py`](perception/bbox_tracker.py)（检测框跟踪；sim/bbox_tracker.py 是兼容 shim）、
 [`sim/p_axis_probe.py`](sim/p_axis_probe.py)（执行层符号标定，换机体/固件必做）。
 仿真工作区全貌与踩坑清单：[`sim/README.md`](sim/README.md)。
 
@@ -308,7 +407,7 @@ YOLO_PORT=9301 ./sim/trial_p_strike.sh b_onnx --target-width 2.38   # 无头单�
 
 GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index **1** = `GPU-40c96051-...`），
 绝不上 nvidia-smi index 0（其他用户的卡）。细节与两个坑见本地文档
-`docs/interception/2026-10-05-onnx-nvidia0-gpu-test.md`（未纳入版本控制）。
+`docs/archive/2026-09-10-sim-design/2026-10-05-onnx-nvidia0-gpu-test.md`（未纳入版本控制）。
 
 ---
 
@@ -322,7 +421,7 @@ GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index
 
 > 三者 mAP50：`.bin`/`.onnx` 同源（0.879，1 类）；`best.pt` 验证集 mAP50 0.9805 / mAP50-95 0.8205。
 > 仿真闭环里 `.onnx` 与 `.pt` 的**命中精度无差别**（见上表），差异只在 >40 m 段召回。
-> 追踪：中心距离匹配 + EMA 平滑（机载 `tracker.py`）/ 门限关联 + 外推（仿真 `sim/bbox_tracker.py`）。
+> 追踪：中心距离匹配 + EMA 平滑（旧版机载 legacy/rdk_x5_pico/tracker.py）/ 门限关联 + 外推（perception/bbox_tracker.py，仿真与 Pi5 共用）。
 
 ---
 
@@ -337,4 +436,4 @@ GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index
 | `sim/results/` | 验证数据（`.csv`/`.png`）；复盘报告 `*.md` 为本地文档 |
 
 代码规范：Python 以 `python3 -m flake8 --select=E9,F63,F7,F82,F401,F841,E722,W605` 零告警为准，
-`python3 -m pytest -q` 全绿（当前 153 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
+`python3 -m pytest -q` 全绿（当前 350 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。

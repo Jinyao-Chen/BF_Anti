@@ -8,6 +8,9 @@
   5. 进入替换 0.5s 斜坡; 退出立即
   6. 无 CRSF -> BENCH 模式 (键盘切换, base_throttle)
 AUX1-4 (含 ARM) 永远透传飞手.
+FC 模式 (channel_source): AUX 只回放飞手缓存值; RC 缓存过期 (>rc_stale_timeout)
+或不足 8 通道时不发任何 MSP RC 帧, 交给飞控原生 failsafe, 绝不猜 AUX.
+BENCH 模式是唯一会主动置 AUX1=2000 的路径 (仅拆桨台架).
 """
 import time
 import threading
@@ -34,15 +37,33 @@ class RCMux:
 
     def __init__(self, msp, crsf=None, switch_channel=None,
                  base_throttle=1100, crsf_timeout=0.5, cmd_timeout=0.5,
-                 rate_hz=50, channel_source=None):
+                 rate_hz=50, channel_source=None, rc_stale_timeout=0.5,
+                 mode_channel=None, arm_channel=None,
+                 stick_takeover=True, auto_engage=True):
         self.msp = msp
         self.crsf = crsf
         self.switch_channel = switch_channel
+        # Three-position mode switch (low=force manual, mid=auto, high=strike).
+        # When set it supersedes the legacy two-position switch_channel.
+        self.mode_channel = mode_channel
+        self.arm_channel = arm_channel
+        self.stick_takeover = bool(stick_takeover)
+        self.auto_engage = bool(auto_engage)
+        self._mode_pos = 0          # 0 manual, 1 auto, 2 strike
+        self._mode_prev = 0
+        self._mode_raw = 1500
+        self._mode_seen_low = False
+        self._auto_request = False
+        self._arm_prev = None
         self.base_throttle = base_throttle
         self.crsf_timeout = crsf_timeout
         self.cmd_timeout = cmd_timeout
         self.rate_hz = rate_hz
         self._channel_source = channel_source  # ()->(channels, age) for FC mode
+        # FC mode: when the MSP_RC cache is older than this, send NO MSP RC
+        # frame at all and let the FC's native failsafe take over.  Never
+        # replay stale pilot values or guess AUX.
+        self.rc_stale_timeout = max(0.0, float(rc_stale_timeout))
         self.on_engage = None
         self.on_disengage = None
 
@@ -60,6 +81,22 @@ class RCMux:
 
     def publish_cmd(self, cmd):
         self._cmd = cmd
+
+    def request_auto(self, want):
+        """Ask the mux to engage.  The mux still owns the final decision.
+
+        The app calls this every control tick with the safety supervisor's
+        verdict.  A target loss simply drops the request; re-acquisition can
+        engage again without cycling the switch.  Force-manual and disarmed
+        states are enforced in _update_mode and can never be overridden here.
+        """
+        self._auto_request = bool(want)
+
+    def mode_position(self):
+        return int(self._mode_pos)
+
+    def mode_name(self):
+        return ("MANUAL", "AUTO", "STRIKE")[max(0, min(2, self._mode_pos))]
 
     def start(self):
         if self._running:
@@ -114,20 +151,25 @@ class RCMux:
     # ── FC 模式: 接收机在飞控上, X5 通过 MSP_GET_RC 读通道 ─────────────
 
     def _tick_fc_mode(self, now):
-        """FC 架构: 开关/接管检测走 MSP RC 缓存, AUX 透传飞手.
-        RPYT 在 AUTO 时用追踪值, 否则发中立值 (FC 靠 BOXMSPOVERRIDE 切换).
+        """FC 架构: 开关/接管检测走 MSP RC 缓存, AUX 永远只透传飞手.
+
+        RPYT 在 AUTO 时用追踪值, 否则用飞手值. AUX 从不写固定值 (旧代码在
+        这里硬编码 AUX3=2000, 会让伴飞逻辑自己去拨 BOXMSPOVERRIDE).
+        RC 缓存过期时不发任何 MSP RC 帧: 让飞控原生 failsafe 接管.
         """
         rc_data, rc_age = self._channel_source()
-        if rc_data is None or rc_age > 2.0:
-            # RC 缓存过期 (>2s) → 不更新 AUX, 仅维持 RPYT
-            self._send_fc_rpyt(now)
+        if rc_data is None or rc_age > self.rc_stale_timeout or len(rc_data) < 8:
+            self._fc_stale()
             return
 
-        ch = rc_data[:16] if len(rc_data) >= 8 else (rc_data + [1500] * (16 - len(rc_data)))
+        ch = list(rc_data[:16])
         self.mode = "PASSTHROUGH"  # FC 架构无 SILENT, failsafe 由飞控原生 CRSF 保证
 
-        self._update_switch(ch)
-        if self._auto and self._takeover(ch):
+        if self.mode_channel is not None:
+            self._update_mode(ch)
+        else:
+            self._update_switch(ch)
+        if self._auto and self.stick_takeover and self._takeover(ch):
             self._exit_auto()
             self._inhibit = True
 
@@ -137,21 +179,94 @@ class RCMux:
             # 透传飞手 RPYT — AUX3 切高位时 FC 立刻用 MSP 值, 必须无缝衔接
             rpyt = (ch[0], ch[1], ch[2], ch[3])
 
-        aux = ch[4:8]
-        self.msp.set_rc(rpyt[0], rpyt[1], rpyt[2], rpyt[3],
-                        aux[0], aux[1], aux[2], aux[3])
-
-    def _send_fc_rpyt(self, now):
-        """RC 缓存过期时仅发送 RPYT (不发 AUX, 避免误触 ARM)."""
-        if self._auto:
-            cmd = self._cmd
-            if cmd is not None and (now - cmd.t) <= self.cmd_timeout:
-                self.msp.set_rc(cmd.roll, cmd.pitch, cmd.throttle, cmd.yaw,
-                                1500, 1500, 2000, 1500)
-            else:
-                self.msp.set_rc(1500, 1500, 1000, 1500, 1500, 1500, 1500, 1500)
+        # AUX1..4 (16 通道时还包括 AUX5..12) 只透传飞手缓存值, 绝不改写成
+        # ARM / ANGLE / BOXMSPOVERRIDE / engage 的指令.
+        if hasattr(self.msp, "send_rc_16"):
+            channels = list(rpyt) + ch[4:16]
+            if len(channels) < 16:
+                channels.extend([1500] * (16 - len(channels)))
+            self.msp.send_rc_16(channels)
         else:
-            self.msp.set_rc(1500, 1500, 1000, 1500, 1500, 1500, 1500, 1500)
+            aux = ch[4:8]
+            self.msp.set_rc(rpyt[0], rpyt[1], rpyt[2], rpyt[3],
+                            aux[0], aux[1], aux[2], aux[3])
+
+    def _fc_stale(self):
+        """RC 缓存过期: 不发 MSP RC 帧, 让 FC failsafe; 退出 AUTO 并上锁."""
+        if self.mode != "FC_STALE":
+            self.mode = "FC_STALE"
+            self._was_substituting = False
+            self._switch_prev = False
+            self._switch_seen_low = False
+            self._mode_pos = 0
+            self._inhibit = True
+            if self._auto:
+                self._exit_auto()
+
+    def _update_mode(self, ch):
+        """Three-position pilot switch + manual arm lockout.
+
+        low  = FORCE MANUAL: never auto, even if the app requests it.
+        mid  = AUTO: engage when the app says the target/safety gate is green.
+        high = STRIKE: same engagement, weapons-hot intent.
+
+        The companion never writes ARM.  A low ARM channel forces the mux out
+        of AUTO and inhibits re-engagement; the next manual arm edge is the
+        pilot's explicit consent and clears the inhibit.  This is why the
+        aircraft never arms itself but can still auto-strike right after the
+        pilot arms with a target already in view.
+        """
+        if len(ch) <= self.mode_channel:
+            return
+        raw = int(ch[self.mode_channel])
+        self._mode_raw = raw
+        prev_pos = self._mode_pos
+        if raw < 1300:
+            pos = 0
+            self._mode_seen_low = True
+            self._inhibit = False
+        elif raw > 1700:
+            pos = 2
+        else:
+            pos = 1
+        self._mode_pos = pos
+
+        if self.arm_channel is not None and len(ch) > self.arm_channel:
+            arm_high = int(ch[self.arm_channel]) > 1700
+            if not arm_high:
+                # Disarmed: kill auto immediately and do not let a stale
+                # request re-engage while the mode switch is still high.
+                if self._auto:
+                    self._exit_auto()
+                elif self._arm_prev is not False and self.on_disengage:
+                    # Manual disarm is also the pilot's reset edge for a
+                    # latched safety fault.
+                    self.on_disengage()
+                self._inhibit = True
+            elif self._arm_prev is False:
+                # Manual arm edge: pilot consent.  Clear the disarm inhibit
+                # and treat it like having seen the switch in a safe
+                # position, so an already-visible target can be engaged.
+                self._inhibit = False
+                self._mode_seen_low = True
+            self._arm_prev = bool(arm_high)
+
+        if pos == 0:
+            if self._auto:
+                self._exit_auto()
+            elif prev_pos != 0 and self.on_disengage:
+                # Pilot deliberately selected FORCE MANUAL.  This is also
+                # the reset edge for a latched safety fault, so AUTO can be
+                # re-entered after the switch is cycled low -> mid/high.
+                self.on_disengage()
+            self._mode_prev = pos
+            return
+        self._mode_prev = pos
+        if self._auto:
+            return
+        if (self.auto_engage and self._auto_request and self._mode_seen_low
+                and not self._inhibit):
+            self._enter_auto(ch)
 
     def _update_switch(self, ch):
         if self.switch_channel is None or len(ch) <= self.switch_channel:
@@ -189,6 +304,10 @@ class RCMux:
             return (ch[0], ch[1], ch[2], ch[3])
         if not self._was_substituting:
             self._ramp_start = now
+            # Recapture the pilot's current throttle.  AUTO may have paused
+            # for a target loss while the pilot climbed/descended; ramping
+            # from the old capture value would cause a throttle step.
+            self.engaged_throttle = ch[2]
             self._was_substituting = True
         self.mode = "AUTO"
         blend = min(1.0, (now - self._ramp_start) / self.RAMP_TIME)
