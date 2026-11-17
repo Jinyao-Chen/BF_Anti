@@ -11,7 +11,12 @@ from typing import Optional
 
 import numpy as np
 
-from guidance.p_visual_guidance import PStrikeCommand, PStrikePhase, PVisualGuidance
+from guidance.p_visual_guidance import (
+    PStrikeCommand,
+    PStrikePhase,
+    PVisualGuidance,
+    p_cmd_to_rc,
+)
 from onboard.config import AppConfig
 from onboard.types import (
     RC_MAX,
@@ -83,31 +88,75 @@ class Controller:
             vel = (0.0, 0.0, float(state.vario_mps))
         return pos, vel
 
-    def _rpyt(self, cmd: PStrikeCommand) -> tuple[int, int, int, int]:
+    def _predict_bbox(self, bbox, age_s: float):
+        """Shift a measured box forward by the detection transport age.
+
+        The camera timestamp is taken at capture, but the box arrives after
+        JPEG/inference/transport.  Without this the controller always flies to
+        where the target was 40-100 ms ago.  Same 120 ms / 90 px clamp as the
+        Gazebo loop; width/height are left to the tracker.
+        """
+        if bbox is None or age_s <= 0.0:
+            return bbox
+        vel = None
+        try:
+            vel = self.tracker.center_velocity_px_s
+        except Exception:
+            vel = None
+        if vel is None:
+            return bbox
+        age = min(0.12, max(0.0, float(age_s)))
+        dx = max(-90.0, min(90.0, float(vel[0]) * age))
+        dy = max(-90.0, min(90.0, float(vel[1]) * age))
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            return bbox
+        return (bbox[0] + dx, bbox[1] + dy, bbox[2] + dx, bbox[3] + dy)
+
+    def _rpyt(self, cmd: PStrikeCommand, state: FcState) -> tuple[int, int, int, int]:
         c = self.cfg.control
-        angle_scale = 500.0 / max(1e-6, float(c.angle_limit_deg))
-        yaw_scale = 500.0 / max(1e-6, float(c.yaw_full_rate_dps))
+        angle_limit = float(c.angle_limit_deg)
+        yaw_full = float(c.yaw_full_rate_dps)
+        att_mode = str(getattr(c, "att_mode", "angle")).lower()
 
-        roll = RC_MID + float(c.roll_sign) * float(cmd.roll_cmd_deg) * angle_scale
-        # Betaflight ANGLE: positive pitch stick = nose down. The guidance
-        # convention is positive pitch = nose up, hence the minus sign.
-        pitch = RC_MID - float(c.pitch_sign) * float(cmd.pitch_cmd_deg) * angle_scale
-        yaw = RC_MID + float(c.yaw_sign) * float(cmd.yaw_rate_dps) * yaw_scale
-        thr = float(cmd.throttle_pwm)
-
-        raw = (
-            _clamp_rc(roll),
-            _clamp_rc(pitch),
-            _clamp_rc(max(float(c.throttle_min), min(float(c.throttle_max), thr))),
-            _clamp_rc(yaw),
-        )
-        lim = int(c.rc_rate_limit)
-        return (
-            _slew(self._prev_rpyt[0], raw[0], lim),
-            _slew(self._prev_rpyt[1], raw[1], lim),
-            _slew(self._prev_rpyt[2], raw[2], lim),
-            _slew(self._prev_rpyt[3], raw[3], lim),
-        )
+        if att_mode == "rate":
+            # Companion-side attitude P -> body-rate command, then ACRO.
+            # This is the sim's --att-mode rate path: the firmware ANGLE loop
+            # only realised ~50-70% of a commanded pitch step, while the rate
+            # cascade reached the commanded attitude.
+            k_att = float(getattr(c, "att_rate_gain", 6.0))
+            rate_max = float(getattr(c, "rate_max_dps", 250.0))
+            rpy = getattr(state, "rpy_deg", (0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0)
+            roll_rate = max(-rate_max, min(rate_max, k_att * (float(cmd.roll_cmd_deg) - float(rpy[0]))))
+            pitch_rate = max(-rate_max, min(rate_max, k_att * (float(cmd.pitch_cmd_deg) - float(rpy[1]))))
+            channels = p_cmd_to_rc(
+                cmd,
+                angle_limit_deg=angle_limit,
+                yaw_full_rate_dps=yaw_full,
+                prev=self._prev_rpyt,
+                rate_limit=int(c.rc_rate_limit),
+                roll_sign=float(c.roll_sign),
+                pitch_sign=float(c.pitch_sign),
+                yaw_sign=float(c.yaw_sign),
+                roll_rate_dps=roll_rate,
+                pitch_rate_dps=pitch_rate,
+                rate_full_dps=float(getattr(c, "rate_full_dps", 600.0)),
+                angle_on=False,
+            )
+        else:
+            channels = p_cmd_to_rc(
+                cmd,
+                angle_limit_deg=angle_limit,
+                yaw_full_rate_dps=yaw_full,
+                prev=self._prev_rpyt,
+                rate_limit=int(c.rc_rate_limit),
+                roll_sign=float(c.roll_sign),
+                pitch_sign=float(c.pitch_sign),
+                yaw_sign=float(c.yaw_sign),
+                angle_on=True,
+            )
+        # AUX channels from the helper are intentionally discarded: the
+        # companion writes RPYT only and never ARM/ANGLE/OVERRIDE.
+        return tuple(int(v) for v in channels[:4])
 
     def step(
         self,
@@ -118,9 +167,13 @@ class Controller:
     ) -> ControlOutput:
         dt = max(1e-3, min(float(dt), 0.5))
         max_age = float(self.cfg.safety.max_det_age_s)
-        if detection is not None and detection.t > 0.0 and (now - detection.t) > max_age:
-            detection = None
+        det_age = 0.0
+        if detection is not None and detection.t > 0.0:
+            det_age = max(0.0, float(now) - float(detection.t))
+            if det_age > max_age:
+                detection = None
         bbox = detection.bbox if detection is not None else None
+        bbox = self._predict_bbox(bbox, det_age)
 
         track = self.tracker.update(bbox, dt=dt, timestamp=now)
         if track.fresh:
@@ -174,7 +227,7 @@ class Controller:
             mode = Mode.TERMINAL
         elif cmd.phase == PStrikePhase.HIT:
             mode = Mode.HIT
-        channels = self._rpyt(cmd)
+        channels = self._rpyt(cmd, state)
         self._prev_rpyt = channels
         self._last_out = ControlOutput(
             mode=mode, channels=channels, command=cmd,

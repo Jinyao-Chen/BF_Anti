@@ -1,4 +1,4 @@
-"""纯 P 视觉制导（P-only visual guidance）：44° 上仰相机反无人机撞机打击控制律。
+"""纯 P 视觉制导（P-only visual guidance）：40° 上仰相机反无人机撞机打击控制律。
 
 设计契约
 --------
@@ -89,6 +89,7 @@ class PStrikeCommand:
     vc_mps: float = 0.0          # 该帧实际使用的接近速度 Vc
     u_rate_px_s: float = 0.0     # 该帧实际喂入的框中心水平像素速率
     pn_roll_deg: float = 0.0     # 该帧比例导引项贡献的滚转（度）
+    lead_deg: float = 0.0        # 该帧横向提前量（度，0=关闭）
     v_proxy_mps: float = 0.0     # 该帧速度代理（speed_source=closing 时是纯视觉合成速度）
     pitch_floor_deg: float = 0.0  # 该帧实际生效的低头下限（超速治理/对准门/低空保护的结果）
 
@@ -106,7 +107,7 @@ class PVisualGuidance:
 
     参数
     ----
-    camera_tilt_deg : 相机相对机头上仰角（默认 44°）。
+    camera_tilt_deg : 相机相对机头上仰角（本机默认 40°；历史 44° 仍可显式传入）。
     image_size / hfov_deg : 内参来源；真实 Gazebo 相机是 640x480 / 1.2 rad = 68.75°。
     kp_yaw / kp_roll / kp_pitch : 归一化像素误差到控制量的比例增益
         （偏航角速率 dps、滚转角 deg、俯仰角 deg，均按"满画面 = 1.0"整定）。
@@ -118,7 +119,7 @@ class PVisualGuidance:
 
     def __init__(
         self,
-        camera_tilt_deg: float = 44.0,
+        camera_tilt_deg: float = 40.0,
         camera_yaw_offset_deg: float = 0.0,
         image_size: tuple[int, int] = (640, 480),
         hfov_deg: float = 68.75,
@@ -161,6 +162,14 @@ class PVisualGuidance:
         pn_roll_cap_deg: float = 15.0,
         pn_vc_min_mps: float = 2.0,
         pn_vc_max_mps: float = 12.0,
+        # 目标横向速度前馈（可选，默认 0）：由 r*λ̇ + 本机横向速度估计目标
+        # 横向速度，再乘剩余飞行时间得到提前量，直接加进滚转/偏航通道。
+        # 这不是新的反馈动态，仍是量测几何；默认关闭以保持旧 P 契约。
+        lead_gain: float = 0.0,
+        lead_clip_deg: float = 30.0,
+        lead_min_mps: float = 2.0,
+        lead_lpf_s: float = 0.7,
+        lead_cutoff_m: float = 0.0,
         speed_source: str = "fc",
         align_gate: float = 0.15,
         roll_align_gate: float = 0.0,
@@ -256,6 +265,12 @@ class PVisualGuidance:
         self.pn_roll_cap_deg = float(pn_roll_cap_deg)   # 软饱和上限：pn 项永不主导
         self.pn_vc_min_mps = float(pn_vc_min_mps)       # Vc 钳位：避免增益被噪声调 15 倍
         self.pn_vc_max_mps = float(pn_vc_max_mps)
+        self.lead_gain = float(lead_gain)
+        self.lead_clip_deg = float(lead_clip_deg)
+        self.lead_min_mps = float(lead_min_mps)
+        self.lead_lpf_s = float(lead_lpf_s)
+        self.lead_cutoff_m = float(lead_cutoff_m)
+        self._lead_v_perp = None
         self._lam_dps: Optional[float] = None           # λ̇ 机体系低通状态（量测调理）
         self._lam_inertial_dps: Optional[float] = None  # λ̇（惯性系，由 az_los 窗口差分得到）
         self._az_hist: list = []         # az_los 历史（量测调理，估视线角速率用）
@@ -491,7 +506,11 @@ class PVisualGuidance:
         # "看起来在远离"的那些帧被钳成 +0.5，EMA 结果系统性偏低 —— 实测终端
         # 真值 5~8 m/s 而估计只有 3.2 m/s，超速治理因此不动作，无人机以 8.6 m/s
         # 冲过目标后只能绕大圈回来。这里改成有符号的窗口斜率，无偏。
-        if np.isfinite(range_s):
+        # Only real measurement frames enter the closing-rate window.  The
+        # real loop runs at 50 Hz while Hailo delivers ~15-20 fps; appending
+        # extrapolated boxes on every control tick would shrink the window
+        # from ~0.4 s to ~0.16 s and make Vc (and the speed governor) noisy.
+        if fresh and np.isfinite(range_s):
             self._range_hist.append((float(timestamp), float(range_s)))
         if len(self._range_hist) > self.closing_fit_n:
             del self._range_hist[0: len(self._range_hist) - self.closing_fit_n]
@@ -548,6 +567,35 @@ class PVisualGuidance:
         else:
             v_horiz_proxy = float(np.hypot(own_vel[0], own_vel[1]))
 
+        # 目标横向速度前馈（可选，默认 0）：
+        #   λ̇ = (v_target_perp - v_own_perp) / r
+        #   v_target_perp = r*λ̇ + v_own_perp
+        # 再乘剩余飞行时间 τ 得提前角，直接加到滚转/偏航通道。它只使用
+        # 视觉 λ̇、测距和飞控速度，不读取目标真值。
+        lead_deg = 0.0
+        e_lead_cmd = 0.0
+        if (self.lead_gain > 0.0 and np.isfinite(range_est)
+                and range_est > max(self.terminal_range_m, self.lead_cutoff_m)
+                and v_horiz_proxy > self.velalign_min_speed):
+            az_rad = float(np.deg2rad(az_los))
+            v_own_perp = (float(own_vel[0]) * np.cos(az_rad)
+                          - float(own_vel[1]) * np.sin(az_rad))
+            v_target_perp = (float(range_est) * float(np.deg2rad(lam_dps))
+                             + v_own_perp)
+            # λ̇ 在静止靶上仍有几个 deg/s 的噪声；先低通，再设最小横向速度门。
+            if self.lead_lpf_s > 0.0:
+                a_lead = float(dt) / (self.lead_lpf_s + float(dt))
+                self._lead_v_perp = (v_target_perp if self._lead_v_perp is None
+                                     else self._lead_v_perp + a_lead * (v_target_perp - self._lead_v_perp))
+                v_target_perp = float(self._lead_v_perp)
+            if abs(v_target_perp) >= self.lead_min_mps:
+                lead_deg = float(np.rad2deg(np.arctan2(
+                    self.lead_gain * v_target_perp * tau_s, max(float(range_est), 1e-3))))
+                lead_deg = _clamp(lead_deg, -self.lead_clip_deg, self.lead_clip_deg)
+                # 角度 -> 归一化图像误差（小角近似，用 fx/cx 转换）
+                e_lead_cmd = (self.intrinsics.fx / max(self.intrinsics.cx, 1e-6)
+                              * float(np.tan(np.deg2rad(lead_deg))))
+
         # -------------------------------------------------------------- #
         # P 律
         # -------------------------------------------------------------- #
@@ -587,8 +635,8 @@ class PVisualGuidance:
                 self._ei_pitch_deg -= leak * self._ei_pitch_deg
                 self._ei_roll_deg -= leak * self._ei_roll_deg
 
-        yaw_rate = self.kp_yaw * e_u_cmd
-        roll_cmd = self.kp_roll * e_u_cmd + self._ei_roll_deg
+        yaw_rate = self.kp_yaw * (e_u_cmd + e_lead_cmd)
+        roll_cmd = self.kp_roll * (e_u_cmd + e_lead_cmd) + self._ei_roll_deg
 
         # 速度矢量对齐（仍是比例项）：速度方位与视线方位的夹角 → 滚转。
         # 速度矢量偏右 → 左滚把它拉回来，使航迹对准目标而不是"机头对准"。
@@ -759,6 +807,7 @@ class PVisualGuidance:
             vc_mps=vc_used_mps,
             u_rate_px_s=u_rate_used,
             pn_roll_deg=pn_roll_deg,
+            lead_deg=float(lead_deg),
             v_proxy_mps=v_horiz_proxy,
             pitch_floor_deg=pitch_floor_used_deg,
         )

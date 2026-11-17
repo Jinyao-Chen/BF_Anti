@@ -37,10 +37,24 @@ class RCMux:
 
     def __init__(self, msp, crsf=None, switch_channel=None,
                  base_throttle=1100, crsf_timeout=0.5, cmd_timeout=0.5,
-                 rate_hz=50, channel_source=None, rc_stale_timeout=0.5):
+                 rate_hz=50, channel_source=None, rc_stale_timeout=0.5,
+                 mode_channel=None, arm_channel=None,
+                 stick_takeover=True, auto_engage=True):
         self.msp = msp
         self.crsf = crsf
         self.switch_channel = switch_channel
+        # Three-position mode switch (low=force manual, mid=auto, high=strike).
+        # When set it supersedes the legacy two-position switch_channel.
+        self.mode_channel = mode_channel
+        self.arm_channel = arm_channel
+        self.stick_takeover = bool(stick_takeover)
+        self.auto_engage = bool(auto_engage)
+        self._mode_pos = 0          # 0 manual, 1 auto, 2 strike
+        self._mode_prev = 0
+        self._mode_raw = 1500
+        self._mode_seen_low = False
+        self._auto_request = False
+        self._arm_prev = None
         self.base_throttle = base_throttle
         self.crsf_timeout = crsf_timeout
         self.cmd_timeout = cmd_timeout
@@ -67,6 +81,22 @@ class RCMux:
 
     def publish_cmd(self, cmd):
         self._cmd = cmd
+
+    def request_auto(self, want):
+        """Ask the mux to engage.  The mux still owns the final decision.
+
+        The app calls this every control tick with the safety supervisor's
+        verdict.  A target loss simply drops the request; re-acquisition can
+        engage again without cycling the switch.  Force-manual and disarmed
+        states are enforced in _update_mode and can never be overridden here.
+        """
+        self._auto_request = bool(want)
+
+    def mode_position(self):
+        return int(self._mode_pos)
+
+    def mode_name(self):
+        return ("MANUAL", "AUTO", "STRIKE")[max(0, min(2, self._mode_pos))]
 
     def start(self):
         if self._running:
@@ -135,8 +165,11 @@ class RCMux:
         ch = list(rc_data[:16])
         self.mode = "PASSTHROUGH"  # FC 架构无 SILENT, failsafe 由飞控原生 CRSF 保证
 
-        self._update_switch(ch)
-        if self._auto and self._takeover(ch):
+        if self.mode_channel is not None:
+            self._update_mode(ch)
+        else:
+            self._update_switch(ch)
+        if self._auto and self.stick_takeover and self._takeover(ch):
             self._exit_auto()
             self._inhibit = True
 
@@ -165,8 +198,75 @@ class RCMux:
             self._was_substituting = False
             self._switch_prev = False
             self._switch_seen_low = False
+            self._mode_pos = 0
+            self._inhibit = True
             if self._auto:
                 self._exit_auto()
+
+    def _update_mode(self, ch):
+        """Three-position pilot switch + manual arm lockout.
+
+        low  = FORCE MANUAL: never auto, even if the app requests it.
+        mid  = AUTO: engage when the app says the target/safety gate is green.
+        high = STRIKE: same engagement, weapons-hot intent.
+
+        The companion never writes ARM.  A low ARM channel forces the mux out
+        of AUTO and inhibits re-engagement; the next manual arm edge is the
+        pilot's explicit consent and clears the inhibit.  This is why the
+        aircraft never arms itself but can still auto-strike right after the
+        pilot arms with a target already in view.
+        """
+        if len(ch) <= self.mode_channel:
+            return
+        raw = int(ch[self.mode_channel])
+        self._mode_raw = raw
+        prev_pos = self._mode_pos
+        if raw < 1300:
+            pos = 0
+            self._mode_seen_low = True
+            self._inhibit = False
+        elif raw > 1700:
+            pos = 2
+        else:
+            pos = 1
+        self._mode_pos = pos
+
+        if self.arm_channel is not None and len(ch) > self.arm_channel:
+            arm_high = int(ch[self.arm_channel]) > 1700
+            if not arm_high:
+                # Disarmed: kill auto immediately and do not let a stale
+                # request re-engage while the mode switch is still high.
+                if self._auto:
+                    self._exit_auto()
+                elif self._arm_prev is not False and self.on_disengage:
+                    # Manual disarm is also the pilot's reset edge for a
+                    # latched safety fault.
+                    self.on_disengage()
+                self._inhibit = True
+            elif self._arm_prev is False:
+                # Manual arm edge: pilot consent.  Clear the disarm inhibit
+                # and treat it like having seen the switch in a safe
+                # position, so an already-visible target can be engaged.
+                self._inhibit = False
+                self._mode_seen_low = True
+            self._arm_prev = bool(arm_high)
+
+        if pos == 0:
+            if self._auto:
+                self._exit_auto()
+            elif prev_pos != 0 and self.on_disengage:
+                # Pilot deliberately selected FORCE MANUAL.  This is also
+                # the reset edge for a latched safety fault, so AUTO can be
+                # re-entered after the switch is cycled low -> mid/high.
+                self.on_disengage()
+            self._mode_prev = pos
+            return
+        self._mode_prev = pos
+        if self._auto:
+            return
+        if (self.auto_engage and self._auto_request and self._mode_seen_low
+                and not self._inhibit):
+            self._enter_auto(ch)
 
     def _update_switch(self, ch):
         if self.switch_channel is None or len(ch) <= self.switch_channel:
@@ -204,6 +304,10 @@ class RCMux:
             return (ch[0], ch[1], ch[2], ch[3])
         if not self._was_substituting:
             self._ramp_start = now
+            # Recapture the pilot's current throttle.  AUTO may have paused
+            # for a target loss while the pilot climbed/descended; ramping
+            # from the old capture value would cause a throttle step.
+            self.engaged_throttle = ch[2]
             self._was_substituting = True
         self.mode = "AUTO"
         blend = min(1.0, (now - self._ramp_start) / self.RAMP_TIME)

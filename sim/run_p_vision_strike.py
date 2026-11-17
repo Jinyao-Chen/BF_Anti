@@ -77,7 +77,8 @@ CSV_HEADER = [
     "own_truth_e", "own_truth_n", "own_truth_u",
     "truth_roll", "truth_pitch", "truth_yaw",
     "raw_u", "raw_v", "raw_s", "det_age", "track_reason", "cam_age",
-    "vc_mps", "u_rate", "pn_roll", "v_proxy", "pitch_floor",
+    "vc_mps", "u_rate", "pn_roll", "lead_deg", "v_proxy", "pitch_floor",
+    "truth_az_los", "truth_el_los", "truth_los_err",
 ]
 
 
@@ -94,7 +95,9 @@ class AsyncDetector(threading.Thread):
         self.camera = camera
         self.min_conf = float(min_conf)
         self._bbox = None
-        self._t = 0.0
+        self._bbox_t = 0.0            # 最近一次成功检测完成时刻
+        self._frame_t = 0.0           # 该框对应画面的采集时刻（含推理延迟）
+        self._pair_t = 0.0            # 最近一次 (frame,bbox) 配对完成时刻
         self._frame = None
         self._pair = (None, None)      # (frame, bbox) 同一帧，供显示/录像
         self._bbox_vel = None          # 框中心速度(px/**秒**)，用于补偿检测延迟
@@ -117,6 +120,7 @@ class AsyncDetector(threading.Thread):
         while not self._stop:
             try:
                 frame = self.camera.frame()
+                frame_t = time.monotonic()
                 if frame is not None:
                     with self._lock:
                         self.frames += 1
@@ -128,6 +132,7 @@ class AsyncDetector(threading.Thread):
                         # 帧与框必须**成对**保存：异步后主循环若拿"最新帧"配"旧框"，
                         # 框就会落在飞机后面（用户反馈"yolo框跟不住"）。
                         self._pair = (frame, b)
+                        self._pair_t = now_det
                         if (b is not None and self._prev_bbox is not None
                                 and self._prev_det_t > 0.0):
                             # 速度必须折成 **px/s**：此前存的是"每次检测的位移"，
@@ -144,8 +149,8 @@ class AsyncDetector(threading.Thread):
                             self._prev_det_t = now_det
                             self._raw = b
                             self._det_t = now_det
-                        self._t = now_det
-                        if b is not None:
+                            self._bbox_t = now_det
+                            self._frame_t = frame_t
                             self.dets += 1
             except Exception as exc:                 # 不再静默吞异常
                 with self._lock:
@@ -162,13 +167,14 @@ class AsyncDetector(threading.Thread):
         with self._lock:
             if self._pair[0] is None:
                 return None, None
-            if (time.monotonic() - self._t) > max_age or self._pair[1] is None:
+            if (time.monotonic() - self._pair_t) > max_age or self._pair[1] is None:
                 return self._pair[0], None
             return self._pair
 
     def age(self) -> float:
+        """框相对**画面采集**的端到端年龄（含推理/传输延迟）。"""
         with self._lock:
-            return time.monotonic() - self._t if self._t else 0.0
+            return time.monotonic() - self._frame_t if self._frame_t else 0.0
 
     def bbox_velocity(self):
         with self._lock:
@@ -198,7 +204,7 @@ class AsyncDetector(threading.Thread):
 
     def latest(self, max_age: float = 1.0):
         with self._lock:
-            if self._bbox is not None and (time.monotonic() - self._t) <= max_age:
+            if self._bbox is not None and (time.monotonic() - self._bbox_t) <= max_age:
                 return self._bbox
             return None
 
@@ -394,6 +400,11 @@ def build_guidance(args, image_size) -> PVisualGuidance:
         pn_rate_lpf_s=args.pn_rate_lpf,
         pn_vc_min_mps=args.pn_vc_min,
         pn_vc_max_mps=args.pn_vc_max,
+        lead_gain=args.lead_gain,
+        lead_clip_deg=args.lead_clip,
+        lead_min_mps=args.lead_min,
+        lead_lpf_s=args.lead_lpf,
+        lead_cutoff_m=args.lead_cutoff,
         speed_source=args.speed_source,
         velalign_min_speed=args.velalign_min_speed,
         velalign_soft_deg=args.velalign_soft,
@@ -434,6 +445,10 @@ def build_guidance(args, image_size) -> PVisualGuidance:
 def main() -> int:
     parser = argparse.ArgumentParser(description="纯 P 视觉制导打击（Gazebo SITL）")
     parser.add_argument("--world", default="betaflight_world")
+    parser.add_argument("--controller", choices=("p", "pn", "pnl"), default="p",
+                        help="p=纯 P（默认）；pn=P+PN（N=8, cap=15）；pnl=PN+横向提前量（横穿专用）")
+    parser.add_argument("--att-mode", choices=("angle", "rate"), default="rate",
+                        help="angle=固件 ANGLE 内环；rate=伴随机 P 姿态环 + ACRO 角速率内环")
     parser.add_argument("--interceptor", default="iris_with_Betaflight")
     parser.add_argument("--inner-model", default="iris_with_standoffs",
                         help="外层模型内嵌的机体名（轻量机体为 light_quad；顶层相机用空串）")
@@ -445,12 +460,12 @@ def main() -> int:
                         help="预演无 GPS/无光流真机：把飞控给的水平位置/速度对制导律清零"
                              "（none=原样；pos/vel/both）。制导律只用 pos[2] 与 vel，"
                              "所以起作用的是 vel")
-    parser.add_argument("--tilt", type=float, default=44.0)
+    parser.add_argument("--tilt", type=float, default=40.0)
     parser.add_argument("--hfov", type=float, default=68.75)
     parser.add_argument("--target-width", type=float, default=0.55)
-    parser.add_argument("--climb-alt", type=float, default=12.0)
-    parser.add_argument("--stage-pitch", type=float, default=25.0,
-                        help="搜索阶段固定低头角（44° 相机需低头才看得到同高度目标，"
+    parser.add_argument("--climb-alt", type=float, default=5.0)
+    parser.add_argument("--stage-pitch", type=float, default=30.0,
+                        help="搜索阶段固定低头角（40° 相机需低头才看得到同高度目标，"
                              "18-30° 可兼顾视野与温和加速）")
     parser.add_argument("--kp-speed-search", type=float, default=3.0,
                         help="扫描阶段超速收平俯仰的 P 增益 (deg per m/s)")
@@ -479,11 +494,13 @@ def main() -> int:
     parser.add_argument("--acquire-timeout", type=float, default=45.0)
     parser.add_argument("--acquire-frames", type=int, default=3,
                         help="连续 N 帧有效检测才进入 LOCK（防单帧假框）")
-    parser.add_argument("--lost-timeout", type=float, default=0.5,
+    parser.add_argument("--lost-timeout", type=float, default=0.9,
                         help="COAST 保持上一条姿态指令的时长（终端出画后继续压机头）")
     parser.add_argument("--lost-frames", type=int, default=8,
                         help="连续 N 帧无检测则回到搜索/扫描（要大于跟踪器 coast 帧数，"
                              "否则终端漏检会过早丢锁；但也不能太长，否则白白丢掉重捕时机）")
+    parser.add_argument("--hold-after-s", type=float, default=0.0,
+                        help="GUI 结束后保持最后一帧的秒数（仅 --show）")
     parser.add_argument("--duration", type=float, default=90.0)
     parser.add_argument("--rate", type=float, default=20.0)
     parser.add_argument("--hit-radius", type=float, default=0.8)
@@ -492,10 +509,10 @@ def main() -> int:
                         help="真值进入命中圈后继续记录的时长 s（取真实最近点）")
     parser.add_argument("--vertical", choices=("throttle", "althold"), default="throttle")
     # P 律增益
-    parser.add_argument("--kp-yaw", type=float, default=55.0)
-    parser.add_argument("--kp-roll", type=float, default=25.0)
+    parser.add_argument("--kp-yaw", type=float, default=220.0)
+    parser.add_argument("--kp-roll", type=float, default=45.0)
     parser.add_argument("--kp-pitch", type=float, default=13.0)
-    parser.add_argument("--kp-z", type=float, default=1.5)
+    parser.add_argument("--kp-z", type=float, default=1.0)
     parser.add_argument("--kp-vz", type=float, default=250.0)
     parser.add_argument("--vz-max", type=float, default=8.0)
     # 实测：`--climb-along-los 1` 会把爬升限速，延迟"高度到手后才能低头加速"这一步 →
@@ -548,14 +565,14 @@ def main() -> int:
                         help="从下方向上打：垂直通道瞄准视线下方该角度(deg)，0=瞄准目标高度")
     parser.add_argument("--pop-up-z", type=float, default=3.0,
                         help="高度差小于该值即结束抬头段、交回常规律")
-    parser.add_argument("--kp-speed", type=float, default=0.0)
+    parser.add_argument("--kp-speed", type=float, default=8.0)
     parser.add_argument("--roll-align-gate", type=float, default=0.0,
                         help="横向对准门（默认关）：|e_u| 超过此值后衰减滚转指令，"
                              "避免起飞/回头段“航向未对准却先压坡度”造成横向漂移"
                              "（0.10 ≈ 3.4 度）")
     parser.add_argument("--align-gate", type=float, default=0.15,
                         help="|e_u| 大于该值时限制低头（先对准再闭合）")
-    parser.add_argument("--align-pitch", type=float, default=8.0)
+    parser.add_argument("--align-pitch", type=float, default=18.0)
     parser.add_argument("--err-soft", type=float, default=0.35,
                         help="图像误差软饱和宽度（0=纯线性）；抑制捕获段撞限幅")
     parser.add_argument("--align-gate-lpf", type=float, default=0.15,
@@ -577,6 +594,16 @@ def main() -> int:
                         help="比例导引项里 Vc 的下钳位（m/s）")
     parser.add_argument("--pn-vc-max", type=float, default=12.0,
                         help="比例导引项里 Vc 的上钳位（m/s），避免噪声把增益放大")
+    parser.add_argument("--lead-gain", type=float, default=0.0,
+                        help="目标横向速度前馈增益（0=关闭）；0.3~0.7 用于横穿")
+    parser.add_argument("--lead-clip", type=float, default=30.0,
+                        help="横向提前角限幅 deg")
+    parser.add_argument("--lead-min", type=float, default=2.0,
+                        help="目标横向速度门限 m/s（低于它不提前）")
+    parser.add_argument("--lead-lpf", type=float, default=0.7,
+                        help="目标横向速度低通时间常数 s")
+    parser.add_argument("--lead-cutoff", type=float, default=0.0,
+                        help="小于该距离不再做横向提前（m，0=只用 terminal range）")
     parser.add_argument("--pn-min-speed", type=float, default=2.5,
                         help="比例导引项的低速门（m/s）：速度低于此值不产生横向加速度指令"
                              "（起飞/悬停时对准交给偏航通道）")
@@ -597,15 +624,15 @@ def main() -> int:
                         help="小于该距离不滤波（近距离滤波会让 τ 滞后 ~2 m，竖向跟不上）")
     parser.add_argument("--closing-max", type=float, default=25.0,
                         help="接近率估计上限 m/s（防 bbox 抖动把接近率估成 90 m/s）")
-    parser.add_argument("--vmax-close-range", type=float, default=12.0,
+    parser.add_argument("--vmax-close-range", type=float, default=15.0,
                         help="终端限速作用距离 m（0=关闭）；转弯半径正比 v^2")
-    parser.add_argument("--vmax-close-floor", type=float, default=3.0,
+    parser.add_argument("--vmax-close-floor", type=float, default=4.0,
                         help="终端限速下限 m/s")
-    parser.add_argument("--v-max", type=float, default=12.0)
-    parser.add_argument("--hover-pwm", type=float, default=1670.0)
-    parser.add_argument("--max-roll", type=float, default=25.0)
-    parser.add_argument("--max-pitch-down", type=float, default=44.0)
-    parser.add_argument("--max-yaw-rate", type=float, default=120.0)
+    parser.add_argument("--v-max", type=float, default=10.0)
+    parser.add_argument("--hover-pwm", type=float, default=1430.0)
+    parser.add_argument("--max-roll", type=float, default=30.0)
+    parser.add_argument("--max-pitch-down", type=float, default=50.0)
+    parser.add_argument("--max-yaw-rate", type=float, default=300.0)
     parser.add_argument("--angle-limit", type=float, default=60.0)
     parser.add_argument("--yaw-full-rate", type=float, default=300.0)
     parser.add_argument("--lift-ff", action="store_true")
@@ -647,6 +674,35 @@ def main() -> int:
                              "供离线做检测器 A/B（不画框，保持像素原始）")
     parser.add_argument("--dump-hz", type=float, default=10.0)
     args = parser.parse_args()
+    # 统一控制器 profile：显式的 --pn-gain 仍可覆盖（用于单参数消融）。
+    if args.controller in ("pn", "pnl"):
+        if args.pn_gain == parser.get_default("pn_gain"):
+            args.pn_gain = 8.0 if args.controller == "pn" else 12.0
+        if args.pn_roll_cap == parser.get_default("pn_roll_cap"):
+            args.pn_roll_cap = 15.0 if args.controller == "pn" else 20.0
+        # Keep fc speed by default in simulation; --speed-source closing is
+        # still available for the no-GPS sim2real rehearsal.
+        if args.kp_velalign == parser.get_default("kp_velalign"):
+            args.kp_velalign = 0.0
+        if args.roll_align_gate == parser.get_default("roll_align_gate"):
+            args.roll_align_gate = 0.10 if args.controller == "pn" else 0.0
+        if args.controller == "pnl":
+            if args.lead_gain == parser.get_default("lead_gain"):
+                args.lead_gain = 0.6
+            if args.lead_min == parser.get_default("lead_min"):
+                args.lead_min = 0.0
+            if args.lead_lpf == parser.get_default("lead_lpf"):
+                args.lead_lpf = 0.35
+            if args.lead_cutoff == parser.get_default("lead_cutoff"):
+                args.lead_cutoff = 6.0
+    elif args.pn_gain != parser.get_default("pn_gain"):
+        raise SystemExit("--controller p 与显式 --pn-gain 冲突；请用 --controller pn")
+    if args.att_mode == "rate":
+        args.att_rate_mode = 1
+    print(f"[controller] mode={args.controller} att={args.att_mode} "
+          f"pn_gain={args.pn_gain:.2f} tilt={args.tilt:.1f} "
+          f"speed={args.speed_source} "
+          f"max_pitch_down={args.max_pitch_down:.1f}", flush=True)
 
     if not sitl_reachable():
         print("ERROR: SITL MSP 127.0.0.1:5761 不可达。先启动 SITL+Gazebo：", flush=True)
@@ -759,6 +815,7 @@ def main() -> int:
     tracker = BboxTracker(confirm_frames=args.confirm_frames,
                           max_coast_frames=args.coast_frames, gate_px=args.gate_px)
     disp_bbox = None          # 显示用的框（与 frame 同帧）
+    last_det_vis = None       # 最近一张带检测框的显示帧（GUI hold 用）
     last_track_t = 0.0        # 上一次跟踪器更新的时刻（算真实控制周期）
     raw_bbox, raw_age = None, float("nan")
     cam_ref = None            # 上一次比较用的帧（灰度）
@@ -942,6 +999,24 @@ def main() -> int:
             rc.set_channels(channels)
             final_cmd = cmd
 
+            truth_az = truth_el = truth_los_err = float("nan")
+            if pose is not None:
+                rel_t = np.asarray(pose.target_position_enu, dtype=float) - np.asarray(
+                    pose.own_position_enu, dtype=float)
+                r_t = float(np.linalg.norm(rel_t))
+                if r_t > 1e-6:
+                    truth_az = float(np.rad2deg(np.arctan2(rel_t[0], rel_t[1])) % 360.0)
+                    truth_el = float(np.rad2deg(np.arcsin(np.clip(rel_t[2] / r_t, -1.0, 1.0))))
+                    if np.isfinite(cmd.az_los_deg) and np.isfinite(cmd.el_los_deg):
+                        az_e = np.deg2rad(cmd.az_los_deg)
+                        el_e = np.deg2rad(cmd.el_los_deg)
+                        est = np.array([np.sin(az_e) * np.cos(el_e),
+                                        np.cos(az_e) * np.cos(el_e),
+                                        np.sin(el_e)])
+                        truth = rel_t / r_t
+                        truth_los_err = float(np.rad2deg(np.arccos(
+                            np.clip(float(est @ truth), -1.0, 1.0))))
+
             rows.append([
                 elapsed, cmd.phase.value,
                 cmd.u_px, cmd.v_px, cmd.s_px, cmd.e_u, cmd.e_v,
@@ -959,7 +1034,9 @@ def main() -> int:
                 ((raw_bbox[2] - raw_bbox[0]) if raw_bbox is not None else float("nan")),
                 raw_age, track.reason,
                 (camera.age_s if camera is not None else float("nan")),
-                cmd.vc_mps, cmd.u_rate_px_s, cmd.pn_roll_deg, cmd.v_proxy_mps, cmd.pitch_floor_deg,
+                cmd.vc_mps, cmd.u_rate_px_s, cmd.pn_roll_deg, cmd.lead_deg,
+                cmd.v_proxy_mps, cmd.pitch_floor_deg,
+                truth_az, truth_el, truth_los_err,
             ])
 
             # ---- 判断 Gazebo 实拍是否跟随机体（本机 gz-sim 会定格）----
@@ -989,11 +1066,15 @@ def main() -> int:
             if frame is not None and (viewer is not None or writer is not None):
                 est_r = cmd.range_est_m if np.isfinite(cmd.range_est_m) else float("nan")
                 speed = float(np.linalg.norm(own["vel"][:2]))
+                # 显示框必须与显示帧同源：异步检测下用 detector 的 (frame,bbox) 配对，
+                # 不能用控制用的最新框/跟踪器预测框，否则 HUD 与画面会互相矛盾。
+                show_bbox = bbox if detector is None else disp_bbox
                 hud = [
                     "P-ONLY VISUAL STRIKE   phase=%s%s"
                     % (cmd.phase.value, "   *** HIT ***" if cmd.hit else ""),
-                    "truth_r=%6.2fm  est_r=%6.2fm  bbox=%s"
-                    % (truth_range, est_r, "yes" if bbox is not None else "--"),
+                    "truth_r=%6.2fm  est_r=%6.2fm  bbox=%s  det=%.0fms"
+                    % (truth_range, est_r, "yes" if show_bbox is not None else "--",
+                       (detector.age() * 1000.0) if detector is not None else 0.0),
                     "e_u=%+.2f  e_v=%+.2f  el_los=%+.1fdeg"
                     % (cmd.e_u, cmd.e_v, cmd.el_los_deg),
                     "alt=%5.1fm  spd=%4.1fm/s  thr=%4.0f  sat=%d"
@@ -1017,8 +1098,9 @@ def main() -> int:
                         view_pos, view_rpy, kf_target_pos, args.target_width,
                         intr, extr, image_size, args.tilt)
                 hud.append("view=%s" % ("camera" if use_cam else "projected"))
-                show_bbox = bbox if detector is None else disp_bbox
-                vis = draw_view(base_img, show_bbox, hud, hit=cmd.hit, lost=bbox is None)
+                vis = draw_view(base_img, show_bbox, hud, hit=cmd.hit, lost=show_bbox is None)
+                if show_bbox is not None:
+                    last_det_vis = vis.copy()
                 if writer is not None:
                     writer.write(vis)
                 if viewer == "show":
@@ -1066,6 +1148,17 @@ def main() -> int:
             # 注意：用**完整周期**(含休眠)做 EMA，否则状态行会报出 38 Hz 而实际是 20 Hz
             loop_period_avg = 0.8 * loop_period_avg + 0.2 * max(
                 1e-4, time.monotonic() - loop_start)
+
+        # GUI 演示：命中后保持最后一帧窗口，避免 6 s 就消失。
+        if args.hold_after_s > 0 and viewer == "show" and "vis" in locals():
+            import cv2
+            hold_t0 = time.monotonic()
+            print(f"holding GUI for {args.hold_after_s:.1f}s after run", flush=True)
+            hold_vis = last_det_vis if last_det_vis is not None else vis
+            while time.monotonic() - hold_t0 < args.hold_after_s:
+                cv2.imshow("BF_Anti  P-only visual strike", hold_vis)
+                if (cv2.waitKey(50) & 0xFF) in (27, ord("q")):
+                    break
     except KeyboardInterrupt:
         print("interrupted", flush=True)
     finally:

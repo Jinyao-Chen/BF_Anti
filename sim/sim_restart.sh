@@ -4,7 +4,7 @@
 #   ./sim/sim_restart.sh stop       # 只停止
 set -u
 cd "$(dirname "$0")/.."
-WORLD="${BF_ANTI_WORLD:-$PWD/sim/worlds/bf_anti_p_strike_light_cam.sdf}"
+WORLD="${BF_ANTI_WORLD:-$PWD/sim/worlds/bf_anti_p_strike_light_shell.sdf}"
 pkill -9 -f "gz sim" 2>/dev/null
 pkill -9 -f "betaflight_SITL" 2>/dev/null
 pkill -f "launch_sitl" 2>/dev/null

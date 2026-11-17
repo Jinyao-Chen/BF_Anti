@@ -104,7 +104,13 @@ class HailoDetector:
         self._pending_generation = 0
 
         self._last_det: Optional[Detection] = None
+        self._last_det_t = 0.0
         self._last_detections: list[Detection] = []
+        # Frame that produced _last_det, kept as a pair so the OSD never draws
+        # an old box on a newer frame.  The control loop uses detection.t
+        # (capture time) and extrapolates by age; display uses this pair.
+        self._last_pair: Optional[tuple[Any, Detection]] = None
+        self._last_pair_t = 0.0
         self._last_frame_t = 0.0
         self._frames = 0
         self._errors = 0
@@ -202,15 +208,54 @@ class HailoDetector:
     def latest(
         self, max_age_s: Optional[float], now: Optional[float] = None
     ) -> Optional[Detection]:
+        """Newest successful detection, retained across blank frames.
+
+        A single missed inference must not erase the last good box: the
+        tracker is allowed to coast for a few frames and the safety gate uses
+        detection.t (capture time), not the time this method was called.  The
+        box is only discarded when it is older than max_age_s.
+        """
         now = self._clock() if now is None else float(now)
         with self._lock:
             det = self._last_det
+            det_t = self._last_det_t
         if det is None:
             return None
+        stamp = float(det.t) if float(det.t) > 0.0 else det_t
         if max_age_s is not None and float(max_age_s) > 0.0:
-            if (now - det.t) > float(max_age_s):
+            if (now - stamp) > float(max_age_s):
                 return None
         return det
+
+    def latest_pair(
+        self, max_age_s: Optional[float] = None, now: Optional[float] = None
+    ) -> tuple[Optional[Any], Optional[Detection]]:
+        """Frame and detection from the same capture, for OSD/recording.
+
+        Drawing a detection from an older frame on a newer camera image makes
+        the box lag the aircraft even when control is correctly extrapolated.
+        """
+        now = self._clock() if now is None else float(now)
+        with self._lock:
+            pair = self._last_pair
+            pair_t = self._last_pair_t
+        if pair is None:
+            return None, None
+        if max_age_s is not None and float(max_age_s) > 0.0:
+            if (now - pair_t) > float(max_age_s):
+                return None, None
+        return pair
+
+    def detection_age(self, now: Optional[float] = None) -> float:
+        """Age of the newest successful detection, in seconds (inf if none)."""
+        now = self._clock() if now is None else float(now)
+        with self._lock:
+            det = self._last_det
+            det_t = self._last_det_t
+        if det is None:
+            return float("inf")
+        stamp = float(det.t) if float(det.t) > 0.0 else det_t
+        return max(0.0, now - stamp)
 
     def latest_detections(
         self, max_age_s: Optional[float], now: Optional[float] = None
@@ -241,7 +286,7 @@ class HailoDetector:
                 infer_ms=self._infer_ms,
                 fps=self._fps,
                 last_frame_t=self._last_frame_t,
-                last_det_t=self._last_det.t if self._last_det is not None else 0.0,
+                last_det_t=self._last_det_t,
                 last_error=self._last_error,
                 running=self._running,
                 ready=self._ready,
@@ -506,11 +551,33 @@ class HailoDetector:
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         frame_stamp = float(stamp) if stamp > 0.0 else now
+        self._publish(frame, dets, best, frame_stamp, now, elapsed_ms)
+
+    def _publish(
+        self,
+        frame: Any,
+        dets: list[Detection],
+        best: Optional[Detection],
+        frame_stamp: float,
+        now: float,
+        elapsed_ms: float,
+    ) -> None:
+        """Record one processed frame (also used by the regression tests).
+
+        ``_last_det`` is only replaced on a successful detection.  A blank
+        frame clears ``_last_detections`` (so the HUD shows no box on that
+        frame) but leaves the last good box available for tracking/coasting
+        until it ages out.
+        """
         with self._lock:
             self._frames += 1
-            self._last_detections = dets
-            self._last_det = best
-            self._last_frame_t = frame_stamp
+            self._last_detections = list(dets)
+            self._last_frame_t = float(frame_stamp)
+            if best is not None:
+                self._last_det = best
+                self._last_det_t = float(frame_stamp)
+                self._last_pair = (frame, best)
+                self._last_pair_t = float(frame_stamp)
             alpha = 0.1
             self._infer_ms = (
                 elapsed_ms if self._infer_ms <= 0.0 else (1.0 - alpha) * self._infer_ms + alpha * elapsed_ms

@@ -4,7 +4,7 @@
 set -u
 cd "$(dirname "$0")/.."
 NAME="$1"; shift
-LOG="/tmp/trial_${NAME}.csv"
+LOG="${LOG:-/tmp/trial_${NAME}.csv}"
 # 检测后端（与 run_p_strike_live.sh 同一套开关）：
 #   YOLO_BACKEND=pt    我们的 YOLOv8-L  anti_uav_best.pt      -> :9300, --target-width 2.0
 #   YOLO_BACKEND=onnx  第三方 YOLOv8n  v1_yolov8_mAP50.onnx   -> :9301, --target-width 2.38
@@ -36,7 +36,7 @@ if [ -n "${DUMP_DIR:-}" ]; then
 fi
 echo "[${NAME}] 检测后端 ${YOLO_BACKEND} @ ${YOLO_HOST}:${YOLO_PORT} 可用（target-width=${TARGET_WIDTH}）；重启仿真 ..."
 pkill -9 -f "gz sim" 2>/dev/null; pkill -9 -f betaflight_SITL 2>/dev/null; sleep 3
-BF_ROOT="$HOME/betaflight" BF_ANTI_WORLD="$PWD/sim/worlds/bf_anti_p_strike_light_cam.sdf" \
+BF_ROOT="$HOME/betaflight" BF_ANTI_WORLD="$PWD/sim/worlds/bf_anti_p_strike_light_shell.sdf" \
     ./sim/launch_sitl.sh --headless > "/tmp/trial_${NAME}_sim.log" 2>&1 &
 SIM_PID=$!
 echo "[${NAME}] 启动 SITL+Gazebo(headless)，日志 /tmp/trial_${NAME}_sim.log"
@@ -56,26 +56,44 @@ if [ "${READY}" != "1" ]; then
 fi
 echo "[${NAME}] MSP 就绪；再等 40 s 让固件接管 FDM ..."
 sleep 40
+# 配对试验：把靶机放到指定 Gazebo 坐标（x=N, y=-E, z=U）。
+if [ -n "${TARGET_X:-}" ]; then
+    echo "[${NAME}] 设置靶机初始位姿 ($TARGET_X, ${TARGET_Y:-0}, ${TARGET_Z:-12})"
+    if ! gz service -s /world/betaflight_world/set_pose \
+        --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 3000 \
+        --req "name: 'target_drone' position: {x: ${TARGET_X} y: ${TARGET_Y:-0} z: ${TARGET_Z:-12}}" \
+        > "/tmp/trial_${NAME}_setpose.log" 2>&1; then
+        echo "[${NAME}] ABORT: set_pose 失败，见 /tmp/trial_${NAME}_setpose.log"
+        kill "${SIM_PID}" 2>/dev/null
+        exit 4
+    fi
+    sleep 1
+fi
 # 靶机匀速运动（可选）：TARGET_VEL_E / TARGET_VEL_N（m/s，ENU）。不设则靶机静止。
 TGT_PID=""
 if [ -n "${TARGET_VEL_E:-}" ] || [ -n "${TARGET_VEL_N:-}" ]; then
     echo "[${NAME}] 靶机匀速运动：E=${TARGET_VEL_E:-0} N=${TARGET_VEL_N:-0} m/s"
-    python3 sim/move_target.py --vel-e "${TARGET_VEL_E:-0}" --vel-n "${TARGET_VEL_N:-0}" \
-        --duration 150 --print-hz 0.5 > "/tmp/trial_${NAME}_target.log" 2>&1 &
+    # 可选延迟：等控制回路真正开始后再让靶机运动，避免 40 s 固件等待 +
+    # 相机/解锁启动期间把它提前推离 set_pose 位置。
+    ( sleep "${TARGET_START_DELAY_S:-0}"; exec python3 sim/move_target.py \
+        --vel-e "${TARGET_VEL_E:-0}" --vel-n "${TARGET_VEL_N:-0}" \
+        --duration 150 --print-hz 0.5 ) > "/tmp/trial_${NAME}_target.log" 2>&1 &
     TGT_PID=$!
     sleep 1
 fi
 echo "[${NAME}] 开始打击（最长 90 s，逐秒进度写 /tmp/trial_${NAME}.out）"
 timeout 90 python3 sim/run_p_vision_strike.py --yolo-host "${YOLO_HOST}" --yolo-port "${YOLO_PORT}" \
-    --min-conf 0.10 --inner-model "" --cam-link cam_link --view camera \
-    --hover-pwm 1430 --tilt 20 --climb-alt 5 --stage-pitch 8 --duration 30 \
+    --min-conf 0.10 --inner-model light_quad --cam-link base_link --view camera \
+    --hover-pwm 1430 --tilt 40 --climb-alt 5 --stage-pitch 30 --duration 30 \
     --target-width "${TARGET_WIDTH}" --hit-radius 0.8 \
-    --max-pitch-down 25 --angle-limit 40 --kp-pitch 13 --kp-yaw 220 --max-yaw-rate 300 \
-    --kp-roll 45 --kp-z 1.0 --max-roll 30 --kp-speed 4 --v-max 5 --kp-velalign 1.5 \
+    --max-pitch-down 50 --angle-limit 60 --kp-pitch 13 --kp-yaw 220 --max-yaw-rate 300 \
+    --speed-source "${SPEED_SOURCE:-closing}" \
+    --kp-roll 45 --kp-z 1.0 --max-roll 30 --kp-speed 8 --v-max 10 --kp-velalign 1.5 \
     --vz-time-to-go 1 --ki-z 0.05 \
-    --align-gate 0.05 --align-pitch 5 --lift-ff --lost-timeout 0.9 --lost-frames 8 \
+    --align-gate 0.15 --align-pitch 18 --lift-ff --lost-timeout 0.9 --lost-frames 8 \
+    --controller "${CONTROLLER:-pn}" --att-mode "${ATT_MODE:-rate}" \
     --err-soft 0.35 --tau-max 3.0 --velalign-min-speed 2.5 --velalign-soft 10 \
-    --range-lpf 0.25 --closing-max 25 --vmax-close-range 12 --vmax-close-floor 3 \
+    --range-lpf 0.25 --closing-max 25 --vmax-close-range 15 --vmax-close-floor 4 \
     --reacquire-angle 60 --reacquire-rate 200 \
     "${MASK_ARGS[@]}" "${DUMP_ARGS[@]}" --log "$LOG" "$@" > "/tmp/trial_${NAME}.out" 2>&1 &
 RUN_PID=$!

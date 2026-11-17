@@ -168,11 +168,19 @@ class DisplayPipeline:
         state: Any,
         decision: Any,
         now: Optional[float] = None,
+        frame_t: Optional[float] = None,
     ) -> None:
-        """Queue the newest snapshot. Never blocks on rendering or I/O."""
+        """Queue the newest snapshot. Never blocks on rendering or I/O.
+
+        ``now`` is the control-loop tick (used for OSD ages); ``frame_t`` is
+        the capture timestamp of ``frame``.  They differ when the OSD is fed
+        the detector's frame+box pair: the pair is the only way to keep the
+        box on the image it was measured in.
+        """
         if not self.enabled:
             return
         stamp = self._clock() if now is None else float(now)
+        frame_stamp = stamp if frame_t is None else float(frame_t)
         with self._cond:
             if self._pending is not None:
                 self._dropped += 1
@@ -187,7 +195,8 @@ class DisplayPipeline:
                     )
             self._last_submit_t = stamp
             self._pending = (
-                frame, detection, out, state, decision, stamp, self._clock(),
+                frame, detection, out, state, decision, stamp, frame_stamp,
+                self._clock(),
             )
             self._cond.notify()
 
@@ -247,12 +256,13 @@ class DisplayPipeline:
                 next_t = self._clock()
 
     def _process(self, item: tuple, stale_s: float) -> None:
-        frame, detection, out, state, decision, stamp, _enqueued = item
+        frame, detection, out, state, decision, stamp, frame_stamp, _enqueued = item
         now = self._clock()
-        # Age is measured from the caller's timestamp (control-loop monotonic
-        # clock) so a frame queued while the display thread was busy is
-        # correctly recognised as stale instead of being rendered late.
-        if (now - float(stamp)) > stale_s:
+        # Age is measured from the capture timestamp so a detector frame/box
+        # pair queued while the display thread was busy is recognised as
+        # stale instead of being rendered late.  OSD still gets the control
+        # tick (stamp) for its end-to-end detection-age readout.
+        if (now - float(frame_stamp)) > stale_s:
             with self._lock:
                 self._stale += 1
             return

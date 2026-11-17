@@ -48,6 +48,7 @@ class OnboardApp:
             require_engage=cfg.fc.require_engage,
         )
         self._engaged = False
+        self._pending_reset: Optional[str] = None
         self._stop = threading.Event()
         self._last_step: Optional[float] = None
         self._last_dt: float = 0.0
@@ -80,7 +81,9 @@ class OnboardApp:
             from rc_mux import RCMux
             self.mux = RCMux(
                 self.link,
-                switch_channel=self.cfg.fc.aux_engage,
+                mode_channel=self.cfg.fc.aux_engage,
+                arm_channel=self.cfg.fc.aux_arm,
+                stick_takeover=self.cfg.fc.stick_takeover,
                 base_throttle=self.cfg.control.hover_throttle,
                 crsf_timeout=self.cfg.fc.link_timeout_s,
                 cmd_timeout=self.cfg.safety.target_lost_s,
@@ -98,21 +101,18 @@ class OnboardApp:
         self._built = True
 
     def _on_engage(self, engaged_throttle: int) -> None:
+        # Called from the mux thread.  Do not touch the guidance/tracker state
+        # here: defer the reset to the control tick so the 50 Hz loop never
+        # sees a half-reset guidance object.
         self._engaged = True
-        self.safety.reset()
-        # Keep the tracker lock, but clear guidance integrators / stale geometry.
-        try:
-            self.controller.guidance.reset()
-        except Exception:
-            pass
+        self._pending_reset = "engage"
         LOG.info("auto engaged, pilot throttle=%s", engaged_throttle)
 
     def _on_disengage(self) -> None:
         if self._engaged:
             LOG.info("auto disengaged -> pilot")
         self._engaged = False
-        self.controller.reset()
-        self.safety.reset()
+        self._pending_reset = "disengage"
 
     # -- one control tick -------------------------------------------------
     def _safety_inputs(
@@ -138,11 +138,20 @@ class OnboardApp:
                 detector_ok = bool(self.detector.healthy(now))
             except Exception:
                 detector_ok = False
+        mode_pwm = aux(self.cfg.fc.aux_engage)
+        if self.cfg.fc.override_from_mode:
+            # The same 3-pos switch drives BOXMSPOVERRIDE on the FC: low is a
+            # physical CRSF bypass, mid/high let the companion write RPYT.
+            override_on = mode_pwm >= 1300
+        else:
+            override_on = aux(self.cfg.fc.aux_override) > 1700
         return SafetyInputs(
             now=now,
             armed=bool(state.armed),
-            override_on=aux(self.cfg.fc.aux_override) > 1700,
-            engage_on=aux(self.cfg.fc.aux_engage) > 1700,
+            override_on=override_on,
+            # Three-position mode: mid (AUTO) and high (STRIKE) both authorize
+            # the companion; low (FORCE MANUAL) never does.
+            engage_on=mode_pwm >= 1300,
             rc_age_s=state.rc_age_s(now),
             att_age_s=state.att_age_s(now),
             alt_age_s=state.alt_age_s(now),
@@ -161,6 +170,18 @@ class OnboardApp:
     def step_once(self, now: Optional[float] = None) -> tuple[ControlOutput, SafetyDecision]:
         self._ensure_built()
         now = time.monotonic() if now is None else float(now)
+        if self._pending_reset is not None:
+            try:
+                if self._pending_reset == "engage":
+                    # Keep the tracker lock, but clear guidance integrators and
+                    # any safety latch from before the pilot engaged.
+                    self.controller.guidance.reset()
+                    self.safety.reset()
+                else:
+                    self.controller.reset()
+                    self.safety.reset()
+            finally:
+                self._pending_reset = None
         period = 1.0 / max(1.0, float(self.cfg.control.rate_hz))
         self._last_dt = period if self._last_step is None else (now - self._last_step)
         self._last_step = now
@@ -170,7 +191,13 @@ class OnboardApp:
         out = self.controller.step(detection, state, now, self._last_dt)
         decision = self.safety.evaluate(self._safety_inputs(state, detection, out, now))
 
-        if decision.allow_auto and self._engaged and out.channels is not None:
+        # The mux owns engagement; the app only publishes a fresh command
+        # when the safety gate is green.  This removes the old circular
+        # dependency where the mux waited for a command that the app only
+        # produced after the mux had already engaged.
+        if hasattr(self.mux, "request_auto"):
+            self.mux.request_auto(bool(decision.allow_auto))
+        if decision.allow_auto and out.channels is not None:
             from rc_mux import TrackCmd
             roll, pitch, throttle, yaw = out.channels
             self.mux.publish_cmd(TrackCmd(
@@ -184,10 +211,24 @@ class OnboardApp:
         if self.video is not None:
             frame = None
             frame_t = 0.0
+            video_det = detection
             if self.camera is not None:
                 frame, frame_t = self.camera.latest(self.cfg.safety.max_det_age_s, now)
+            # Prefer the detector's frame+box pair for the OSD.  Drawing a
+            # 40-80 ms old box on a newer camera frame is exactly the "box
+            # lags the aircraft" artefact seen in the GUI before the async fix.
+            if hasattr(self.detector, "latest_pair"):
+                pair_frame, pair_det = self.detector.latest_pair(0.35, now)
+                if pair_frame is not None:
+                    frame = pair_frame
+                    frame_t = float(getattr(pair_det, "t", 0.0) or now)
+                    video_det = pair_det
+                else:
+                    video_det = None
             try:
-                self.video.submit(frame, detection, out, state, decision, now)
+                self.video.submit(
+                    frame, video_det, out, state, decision, now, frame_t
+                )
             except Exception:
                 LOG.exception("video submit failed")
         self.last_output = out
@@ -199,14 +240,17 @@ class OnboardApp:
         self._ensure_built()
         if self.state is not None:
             self.state.start()
+        # Start the RC path before camera/Hailo/video: the FC must see pilot
+        # passthrough frames as early as possible, especially when the pilot
+        # boots with CH8 already out of FORCE MANUAL.
+        if self.mux is not None:
+            self.mux.start()
         if self.camera is not None:
             self.camera.start()
         if self.detector is not None:
             self.detector.start()
         if self.video is not None:
             self.video.start()
-        if self.mux is not None:
-            self.mux.start()
 
     def run(self) -> int:
         self.start()
@@ -234,6 +278,19 @@ class OnboardApp:
 
     def stop(self) -> None:
         self._stop.set()
+        # Betaflight 4.5.x holds the last MSP override values if the sender
+        # disappears.  Give the mux a few frames of pilot passthrough before
+        # it stops, and make the required pilot action unmistakable in the log.
+        if self.mux is not None:
+            try:
+                self.mux.publish_cmd(None)
+                time.sleep(0.12)
+            except Exception:
+                pass
+            LOG.warning(
+                "onboard stopping: if still airborne, flip CH8 to FORCE MANUAL "
+                "(MSP OVERRIDE off) immediately; BF 4.5.x holds the last MSP frame"
+            )
         for name in ("mux", "video", "detector", "camera", "state", "link"):
             obj = getattr(self, name, None)
             if obj is None:

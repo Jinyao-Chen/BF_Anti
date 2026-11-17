@@ -12,18 +12,20 @@ EXAMPLE = os.path.join(ROOT, "config", "onboard.example.json")
 
 def test_example_config_loads_and_profile_overlays():
     cfg = load_config(EXAMPLE)
-    assert cfg.profile == "real_conservative"
+    assert cfg.profile == "real_pn8_angle"
     assert cfg.fc.aux_engage == 7
-    # Values that exist only in config/profiles/real_conservative.json
-    assert cfg.guidance.params["kp_roll"] == 15.0
-    assert cfg.guidance.params["pn_gain"] == 4.0
-    assert cfg.safety.min_altitude_m == 3.0
+    # Values that exist only in config/profiles/real_pn8_angle.json
+    assert cfg.guidance.params["kp_roll"] == 45.0
+    assert cfg.guidance.params["pn_gain"] == 8.0
+    assert cfg.guidance.params["max_pitch_down_deg"] == 50.0
+    assert cfg.safety.min_altitude_m == 2.0
+    assert cfg.control.att_mode == "angle"
 
 
 def test_build_guidance_uses_measured_camera_geometry():
     cfg = load_config(EXAMPLE)
     g = cfg.build_guidance()
-    assert g.kp_roll == 15.0
+    assert g.kp_roll == 45.0
     assert g.camera_tilt_deg == cfg.camera.tilt_deg
     assert g.camera_yaw_offset_deg == cfg.camera.yaw_offset_deg
     assert (g.intrinsics.width, g.intrinsics.height) == (cfg.camera.width, cfg.camera.height)
@@ -44,7 +46,18 @@ def test_rotation_swaps_guidance_image_size(tmp_path):
 
 def test_duplicate_aux_channels_rejected(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
+    # Legacy mode: separate OVERRIDE and MODE switches must be distinct.
+    raw["fc"]["override_from_mode"] = False
     raw["fc"]["aux_engage"] = raw["fc"]["aux_override"]
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="distinct"):
+        load_config(str(p))
+
+
+def test_mode_and_arm_channels_must_still_differ(tmp_path):
+    raw = json.load(open(EXAMPLE, encoding="utf-8"))
+    raw["fc"]["aux_arm"] = raw["fc"]["aux_engage"]
     p = tmp_path / "bad.json"
     p.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="distinct"):

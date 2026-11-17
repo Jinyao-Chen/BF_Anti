@@ -56,9 +56,22 @@ class FcConfig:
     aux_arm: int = 4
     aux_angle: int = 5
     aux_override: int = 6
+    # Three-position pilot mode switch (AUX4 by default):
+    #   low  (<1300) = FORCE MANUAL: companion never engages
+    #   mid  (1300..1700) = AUTO: engage as soon as a target is confirmed
+    #   high (>1700) = STRIKE: weapons-hot, same auto engagement
     aux_engage: int = 7
     require_override: bool = True
     require_engage: bool = True
+    # When true, the same three-position MODE channel also drives the FC's
+    # BOXMSPOVERRIDE range: low = override off (physical CRSF bypass),
+    # mid/high = override on (companion may command RPYT).  This makes the
+    # low position a hardware force-manual even if the Pi is dead.
+    override_from_mode: bool = False
+    # Stick takeover is an extra abort in the legacy two-position path.  In
+    # the three-position path the mode switch is the deliberate abort; leave
+    # this false so AUTO can take over while the pilot is still manoeuvring.
+    stick_takeover: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "FcConfig":
@@ -171,6 +184,12 @@ class VideoConfig:
 @dataclass(frozen=True)
 class ControlConfig:
     rate_hz: float = 50.0
+    # angle = firmware ANGLE inner loop (RC stick is a desired angle)
+    # rate  = companion attitude P + firmware ACRO rate loop
+    att_mode: str = "angle"
+    att_rate_gain: float = 6.0      # 1/s: attitude error (deg) -> rate (dps)
+    rate_max_dps: float = 250.0
+    rate_full_dps: float = 600.0    # must match Betaflight ACTUAL full-stick rate
     angle_limit_deg: float = 60.0
     yaw_full_rate_dps: float = 300.0
     rc_rate_limit: int = 60
@@ -228,6 +247,12 @@ class AppConfig:
             raise ValueError("detector.backend must be hailo, replay or null")
         if self.detector.input_width <= 0 or self.detector.input_height <= 0:
             raise ValueError("detector input size must be positive")
+        if str(self.control.att_mode).lower() not in ("angle", "rate"):
+            raise ValueError("control.att_mode must be angle or rate")
+        if self.control.att_rate_gain <= 0.0 or self.control.rate_max_dps <= 0.0:
+            raise ValueError("control.att_rate_gain/rate_max_dps must be positive")
+        if self.control.rate_full_dps <= 0.0:
+            raise ValueError("control.rate_full_dps must be positive")
         if self.control.throttle_min >= self.control.throttle_max:
             raise ValueError("throttle_min must be < throttle_max")
         if not (self.control.throttle_min <= self.control.hover_throttle <= self.control.throttle_max):
@@ -235,7 +260,13 @@ class AppConfig:
         aux = [self.fc.aux_arm, self.fc.aux_angle, self.fc.aux_override, self.fc.aux_engage]
         if any(not (0 <= a <= 15) for a in aux):
             raise ValueError("AUX channel indices must be in [0, 15]")
-        if len(set(aux)) != len(aux):
+        if self.fc.override_from_mode:
+            # override and mode are the same physical switch by design.
+            if self.fc.aux_arm == self.fc.aux_engage:
+                raise ValueError("aux_arm and aux_engage must be distinct")
+            if self.fc.aux_angle == self.fc.aux_engage:
+                raise ValueError("aux_angle and aux_engage must be distinct")
+        elif len(set(aux)) != len(aux):
             raise ValueError("aux_arm/angle/override/engage must be distinct")
         for name in (
             "max_rc_age_s", "max_att_age_s", "max_alt_age_s", "max_status_age_s",

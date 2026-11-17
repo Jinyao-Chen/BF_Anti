@@ -81,3 +81,48 @@ def test_hit_hands_back_to_pilot():
     assert out is not None
     if out.mode == Mode.HIT:
         assert out.channels is None
+
+from dataclasses import replace
+
+from guidance.p_visual_guidance import PStrikeCommand
+
+
+def test_detection_age_prediction_shifts_box_forward():
+    c = Controller(make_cfg())
+    now = time.monotonic()
+    # Two real measurements establish +100 px/s horizontal velocity.
+    c.tracker.update((500.0, 300.0, 540.0, 340.0), dt=0.05, timestamp=now)
+    c.tracker.update((510.0, 300.0, 550.0, 340.0), dt=0.05, timestamp=now + 0.05)
+    bbox = (510.0, 300.0, 550.0, 340.0)
+    shifted = c._predict_bbox(bbox, 0.10)
+    assert shifted[0] > bbox[0]
+    assert shifted[2] > bbox[2]
+    # The box size is not changed by the shift.
+    assert (shifted[2] - shifted[0]) == pytest.approx(bbox[2] - bbox[0])
+
+
+def test_rate_mode_maps_attitude_error_to_angular_rate():
+    cfg = make_cfg()
+    cfg = replace(cfg, control=replace(cfg.control, att_mode="rate",
+                                        att_rate_gain=6.0, rate_max_dps=250.0,
+                                        rate_full_dps=600.0))
+    c = Controller(cfg)
+    cmd = PStrikeCommand(roll_cmd_deg=0.0, pitch_cmd_deg=10.0,
+                         yaw_rate_dps=0.0, throttle_pwm=1500.0)
+    st = replace(make_state(), rpy_deg=(0.0, 0.0, 0.0))
+    ch = c._rpyt(cmd, st)
+    # 6 * 10 = 60 dps -> 50 RC above centre, and pitch is inverted for BF.
+    assert ch[1] == pytest.approx(1450, abs=3)
+    assert len(ch) == 4
+
+
+def test_angle_mode_still_uses_angle_scaling():
+    cfg = make_cfg()
+    cfg = replace(cfg, control=replace(cfg.control, att_mode="angle",
+                                        angle_limit_deg=60.0, rc_rate_limit=1000))
+    c = Controller(cfg)
+    cmd = PStrikeCommand(roll_cmd_deg=0.0, pitch_cmd_deg=10.0,
+                         yaw_rate_dps=0.0, throttle_pwm=1500.0)
+    st = replace(make_state(), rpy_deg=(0.0, 0.0, 0.0))
+    ch = c._rpyt(cmd, st)
+    assert ch[1] == pytest.approx(1500 - 10 * 500 / 60, abs=3)

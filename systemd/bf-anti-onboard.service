@@ -7,6 +7,10 @@ Documentation=file://__INSTALL_DIR__/README.md
 After=local-fs.target
 Wants=network-online.target
 After=network-online.target
+# Do NOT order on dev-fb0.device: systemd can create a device job that never
+# activates for the framebuffer, which blocks the service indefinitely.  The
+# runtime opens fb0/video/FC lazily and retries internally, so no device
+# ordering is required.
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

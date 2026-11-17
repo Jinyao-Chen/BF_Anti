@@ -22,8 +22,8 @@ logs/
 build/
 config/onboard.json
 
-# Symlinks
-betaflight
+# Symlinks (root-level only; keep config/betaflight tracked)
+/betaflight
 rdk_model_zoo
 Anti-UAV/
 

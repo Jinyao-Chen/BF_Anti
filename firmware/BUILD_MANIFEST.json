@@ -1,14 +1,14 @@
 {
   "generated_at": "2026-10-17T23:12:14+08:00",
   "bf_anti": {
-    "repo": "/home/chen-jinyao/BF_Anti",
+    "repo": ".",
     "branch": "sim2real/pi5-2026-10",
     "commit": "698f899",
     "tag": "baseline-2026-10-17",
     "pytest": "346 passed"
   },
   "firmware": {
-    "repo": "/home/chen-jinyao/betaflight",
+    "repo": "../betaflight",
     "branch": "sim2real/2026-10-17",
     "commit": "5ce40b7691",
     "tag": "sim2real-2026-10-17",
@@ -20,7 +20,7 @@
   "sitl": {
     "target": "SITL_GAZEBO",
     "build_command": "make CONFIG=SITL_GAZEBO -j8",
-    "elf": "/home/chen-jinyao/betaflight/obj/main/betaflight_SITL_SITL_GAZEBO.elf",
+    "elf": "../betaflight/obj/main/betaflight_SITL_SITL_GAZEBO.elf",
     "elf_sha256": "90306d2b81bfff90676289ad4b705fcdaa1448a8ab502ceae6d6b74211f364a2",
     "elf_mtime": "2026-10-17T23:35:42+08:00",
     "build_status": "forced clean rebuild (make -B) succeeded; text=405863 data=23790 bss=79504"

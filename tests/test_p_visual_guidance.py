@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from guidance.p_visual_guidance import (
+    PStrikeCommand,
     PStrikePhase,
     PVisualGuidance,
     _FORBIDDEN_STATE_HINTS,
@@ -465,3 +466,51 @@ def test_pn_term_gated_at_low_speed():
     g2._closing_mps = 10.0
     fast = _run_u_seq(g2, seq)
     assert abs(fast.pn_roll_deg) > 0.1
+
+def test_default_camera_tilt_is_40_degrees():
+    """本机 40° 上仰相机：画面中心、机身低头 40° 时视线仰角≈0。"""
+    g = PVisualGuidance(image_size=IMAGE, hfov_deg=HFOV)
+    assert g.camera_tilt_deg == 40.0
+    bbox = bbox_around(g.intrinsics.cx, g.intrinsics.cy, 40.0)
+    cmd = g.update(bbox, OWN_POS, np.zeros(3), (0.0, -40.0, 0.0), 0.0, 0.05)
+    assert cmd.el_los_deg == pytest.approx(0.0, abs=0.6)
+    assert cmd.pitch_cmd_deg == pytest.approx(-40.0, abs=1.0)
+
+
+def test_rate_mode_maps_pitch_rate_without_angle_switch():
+    """RATE 内环：正俯仰角速度（抬头）→ pitch 通道低于中位，且 ANGLE 开关关闭。"""
+    cmd = PStrikeCommand(pitch_cmd_deg=0.0)
+    ch = p_cmd_to_rc(cmd, pitch_rate_dps=120.0, rate_full_dps=600.0,
+                     angle_on=False)
+    assert ch[1] < 1500
+    assert ch[5] == 1000
+    ch2 = p_cmd_to_rc(PStrikeCommand(pitch_cmd_deg=0.0), pitch_rate_dps=-120.0,
+                      rate_full_dps=600.0, angle_on=False)
+    assert ch2[1] > 1500
+
+def test_lead_term_is_inert_by_default():
+    g = make_guidance()
+    cmd = None
+    for k, u in enumerate([300.0 + 6.0 * k for k in range(15)]):
+        cmd = g.update(bbox_around(u, 240.0, 40.0), OWN_POS,
+                       np.array([0.0, 3.0, 0.0]), (0.0, -30.0, 0.0),
+                       k * 0.05, 0.05, True)
+    assert cmd.lead_deg == pytest.approx(0.0, abs=1e-12)
+
+
+def test_lead_term_biases_roll_toward_target_motion():
+    seq = [300.0 + 8.0 * k for k in range(15)]
+    def run(gain):
+        g = make_guidance(lead_gain=gain, lead_clip_deg=30.0, lead_min_mps=0.0, lead_lpf_s=0.0)
+        out = None
+        for k, u in enumerate(seq):
+            out = g.update(bbox_around(u, 240.0, 40.0), OWN_POS,
+                           np.array([0.0, 3.0, 0.0]), (0.0, -30.0, 0.0),
+                           k * 0.05, 0.05, True)
+        return out
+    off = run(0.0)
+    on = run(0.6)
+    assert off.lead_deg == pytest.approx(0.0, abs=1e-12)
+    assert on.lead_deg > 0.0
+    assert on.roll_cmd_deg > off.roll_cmd_deg
+    assert abs(on.lead_deg) <= 30.0 + 1e-9
