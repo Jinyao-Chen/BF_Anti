@@ -24,6 +24,7 @@
 #   --no-venv           skip venv
 #   --no-service        skip systemd unit
 #   --enable-service    systemctl enable the unit (never starts it)
+#   --persistent-journal  keep journald logs across reboots (root only)
 #   --dry-run           print actions without changing anything
 #   -h, --help          this text
 #
@@ -40,6 +41,7 @@ DO_RSYNC=1
 DO_VENV=1
 DO_SERVICE=1
 ENABLE_SERVICE=0
+DO_PERSISTENT_JOURNAL=0
 DRY_RUN=0
 
 usage() {
@@ -56,6 +58,7 @@ while [ $# -gt 0 ]; do
     --no-venv) DO_VENV=0; shift ;;
     --no-service) DO_SERVICE=0; shift ;;
     --enable-service) ENABLE_SERVICE=1; shift ;;
+    --persistent-journal) DO_PERSISTENT_JOURNAL=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'error: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -187,6 +190,41 @@ else
   warn "no config example at $CONFIG_EXAMPLE"
 fi
 
+step "4b. log directory"
+LOG_DIR="$PREFIX/logs"
+CONFIG_FOR_LOG_DIR="$CONFIG_REAL"
+if [ ! -f "$CONFIG_FOR_LOG_DIR" ] && [ -f "$CONFIG_EXAMPLE" ]; then
+  CONFIG_FOR_LOG_DIR="$CONFIG_EXAMPLE"
+fi
+if [ ! -f "$CONFIG_FOR_LOG_DIR" ] && [ -f "$SOURCE/config/onboard.example.json" ]; then
+  CONFIG_FOR_LOG_DIR="$SOURCE/config/onboard.example.json"
+fi
+if [ -f "$CONFIG_FOR_LOG_DIR" ] && command -v python3 >/dev/null 2>&1; then
+  PARSED_LOG_DIR=$(python3 - "$CONFIG_FOR_LOG_DIR" "$PREFIX" <<'PY' 2>/dev/null || true
+import json, os, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        raw = json.load(fh)
+except Exception:
+    sys.exit(1)
+value = os.path.expandvars(os.path.expanduser(str(raw.get("log_dir", "logs"))))
+if not os.path.isabs(value):
+    value = os.path.join(sys.argv[2], value)
+print(os.path.abspath(value))
+PY
+)
+  [ -n "$PARSED_LOG_DIR" ] && LOG_DIR="$PARSED_LOG_DIR"
+fi
+if [ "$DRY_RUN" -eq 0 ]; then
+  mkdir -p "$LOG_DIR" || warn "could not create log directory: $LOG_DIR"
+  if [ "$IS_ROOT" -eq 1 ] && [ -d "$LOG_DIR" ]; then
+    chown "$BOARD_USER:$BOARD_USER" "$LOG_DIR" || true
+  fi
+  ok "blackbox log directory: $LOG_DIR"
+else
+  info "would create blackbox log directory: $LOG_DIR"
+fi
+
 step "5. Python venv"
 VENV="$PREFIX/.venv"
 if [ "$DO_VENV" -eq 1 ]; then
@@ -242,8 +280,20 @@ if [ "$DO_SERVICE" -eq 1 ]; then
       systemctl enable bf-anti-onboard.service
       ok "enabled bf-anti-onboard.service (not started)"
     else
-      info "unit not enabled; use: sudo systemctl enable --now bf-anti-onboard"
+      warn "unit NOT enabled: it will not start after boot. Use --enable-service"
+      info "or run: sudo systemctl enable --now bf-anti-onboard"
     fi
+  fi
+  if [ "$DO_PERSISTENT_JOURNAL" -eq 1 ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "would enable persistent journald"
+    elif [ "$IS_ROOT" -eq 1 ]; then
+      bash "$SOURCE/scripts/pi5_enable_persistent_journal.sh" || warn "persistent journal setup failed"
+    else
+      warn "not root: skipping persistent journald"
+    fi
+  else
+    info "journald left as-is; add --persistent-journal to keep logs across reboots"
   fi
 else
   info "systemd step skipped"
@@ -256,7 +306,8 @@ printf '%s\n' \
   "3) python3 $PREFIX/scripts/pi5_camera_probe.py --list-only" \
   "4) copy a real config to $PREFIX/config/onboard.json and run:" \
   "   $PREFIX/.venv/bin/python -m onboard.app --config $PREFIX/config/onboard.json" \
-  "5) only after the checks are green: sudo systemctl enable --now bf-anti-onboard"
+  "5) only after the checks are green: sudo systemctl enable --now bf-anti-onboard" \
+  "6) after the next boot verify the blackbox: bash $PREFIX/scripts/pi5_log_check.sh"
 
 if [ "$DRY_RUN" -eq 1 ]; then
   info "dry-run complete; nothing was changed"

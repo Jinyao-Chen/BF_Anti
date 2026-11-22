@@ -87,3 +87,31 @@ def test_config_roundtrip_is_json_serialisable():
     cfg = load_config(EXAMPLE)
     again = AppConfig.from_dict(cfg.to_dict())
     assert again.to_dict() == cfg.to_dict()
+
+
+def test_example_config_enables_the_blackbox():
+    cfg = load_config(EXAMPLE)
+    assert cfg.telemetry.enabled
+    assert cfg.telemetry.hz == 10.0
+    assert cfg.telemetry.max_runs == 20
+    assert cfg.log_dir == "/home/pi5/bf_anti_logs"
+    # log_dir must survive the profile overlay (it is not a profile key).
+    assert cfg.to_dict()["telemetry"]["hz"] == 10.0
+
+
+def test_bad_telemetry_hz_rejected(tmp_path):
+    raw = json.load(open(EXAMPLE, encoding="utf-8"))
+    raw["telemetry"]["hz"] = 500
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="telemetry.hz"):
+        load_config(str(p))
+
+
+def test_bad_telemetry_retention_rejected(tmp_path):
+    raw = json.load(open(EXAMPLE, encoding="utf-8"))
+    raw["telemetry"]["max_runs"] = 0
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="max_runs"):
+        load_config(str(p))

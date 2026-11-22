@@ -179,3 +179,19 @@ def test_optional_position_state_disabled_after_misses():
     assert state.position_enu is None
     tries = [entry for entry in link.queries if entry[0] == MSP_CMD.MSP2_POSITION_STATE]
     assert len(tries) == 3  # POSITION_MAX_MISSES, then disabled
+
+
+def test_slow_poll_timestamps_each_reply_not_the_poll_start():
+    class SlowLink(FakeLink):
+        def query(self, cmd, is_v2=False, timeout=None):
+            time.sleep(0.05)
+            return super().query(cmd, is_v2=is_v2, timeout=timeout)
+
+    estimator = FcStateEstimator(SlowLink(_responses()), _cfg())
+    t0 = time.monotonic()
+    estimator._poll_once()
+    state = estimator.snapshot()
+    # RC is the third query of the tick: with per-reply stamps it is at least
+    # ~0.1 s newer than the poll start, so it is not "born stale".
+    assert state.rc_t - t0 > 0.1
+    assert state.status_t - t0 > state.att_t - t0

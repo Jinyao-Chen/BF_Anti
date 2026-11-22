@@ -206,6 +206,27 @@ class ControlConfig:
 
 
 @dataclass(frozen=True)
+class TelemetryConfig:
+    """Flight-data blackbox (see onboard/telemetry_log.py).
+
+    hz is the CSV row rate, not the control rate: the 50 Hz loop is decimated
+    so a 32 MB segment holds hours of flight.  Set hz to 0 to log every tick.
+    """
+
+    enabled: bool = True
+    hz: float = 10.0
+    max_file_mb: float = 32.0
+    max_runs: int = 20
+    flush_interval_s: float = 1.0
+    fsync_interval_s: float = 5.0
+    level: str = "INFO"
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TelemetryConfig":
+        return cls(**_pick(cls, data))
+
+
+@dataclass(frozen=True)
 class AppConfig:
     profile: str = ""
     log_dir: str = "logs"
@@ -216,6 +237,7 @@ class AppConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     video: VideoConfig = field(default_factory=VideoConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
 
     @classmethod
     def from_dict(cls, data: dict) -> "AppConfig":
@@ -229,6 +251,7 @@ class AppConfig:
             safety=SafetyConfig.from_dict(data.get("safety", {})),
             video=VideoConfig.from_dict(data.get("video", {})),
             control=ControlConfig.from_dict(data.get("control", {})),
+            telemetry=TelemetryConfig.from_dict(data.get("telemetry", {})),
         )
 
     def to_dict(self) -> dict:
@@ -276,6 +299,18 @@ class AppConfig:
                 raise ValueError("safety.%s must be positive" % name)
         if self.safety.min_altitude_m >= self.safety.max_altitude_m:
             raise ValueError("safety.min_altitude_m must be < max_altitude_m")
+        if not (0.0 <= self.telemetry.hz <= 100.0):
+            raise ValueError("telemetry.hz must be in [0, 100]")
+        if self.telemetry.max_file_mb <= 0.0:
+            raise ValueError("telemetry.max_file_mb must be positive")
+        if self.telemetry.max_runs < 1:
+            raise ValueError("telemetry.max_runs must be >= 1")
+        if self.telemetry.flush_interval_s <= 0.0:
+            raise ValueError("telemetry.flush_interval_s must be positive")
+        if self.telemetry.fsync_interval_s < 0.0:
+            raise ValueError("telemetry.fsync_interval_s must be >= 0")
+        if str(self.telemetry.level).upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            raise ValueError("telemetry.level must be DEBUG/INFO/WARNING/ERROR/CRITICAL")
 
     def build_guidance(self):
         """Instantiate PVisualGuidance, injecting measured camera geometry."""

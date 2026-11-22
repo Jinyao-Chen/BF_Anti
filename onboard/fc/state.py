@@ -10,6 +10,9 @@ Rules:
 * yaw is whole degrees (MSP_ATTITUDE); roll/pitch are 0.1 deg.
 * rpy_deg is aviation convention: +roll = right wing down, +pitch = nose up.
   MSP_ATTITUDE pitch is negated on ingest (Betaflight +pitch = nose down).
+* Every field is timestamped when *its own reply* arrives, not when the poll
+  started: a slow boot-time exchange must not publish a sample that is already
+  older than the safety gate's max age.
 * MSP_RC is converted to AETR (the FC sends R,P,Y,T).
 * MSP2 0x3015 position state is optional; after a few misses it is disabled so
   an older FC does not pay a timeout on every poll.
@@ -130,7 +133,7 @@ class FcStateEstimator:
                 # already match.
                 roll, pitch, yaw = attitude
                 updates["rpy_deg"] = (roll, -pitch, yaw)
-                updates["att_t"] = now
+                updates["att_t"] = time.monotonic()
             else:
                 self._errors += 1
 
@@ -141,7 +144,7 @@ class FcStateEstimator:
                 if altitude is not None:
                     updates["altitude_m"] = altitude[0]
                     updates["vario_mps"] = altitude[1]
-                    updates["alt_t"] = now
+                    updates["alt_t"] = time.monotonic()
                 else:
                     self._errors += 1
 
@@ -150,10 +153,11 @@ class FcStateEstimator:
             if payload is not None:
                 channels = decode_rc(payload)
                 if channels is not None:
+                    rc_stamp = time.monotonic()
                     updates["rc"] = channels
-                    updates["rc_t"] = now
+                    updates["rc_t"] = rc_stamp
                     self._rc = tuple(channels)
-                    self._rc_t = now
+                    self._rc_t = rc_stamp
                 elif len(payload) > 0:
                     # Short/corrupt reply: a decode error, not a 0-channel FC.
                     self._errors += 1
@@ -172,7 +176,7 @@ class FcStateEstimator:
             if status is not None:
                 updates["armed"] = bool(status["armed"])
                 updates["flight_mode_flags"] = int(status["flight_mode_flags"])
-                updates["status_t"] = now
+                updates["status_t"] = time.monotonic()
 
         if tick % self.ANALOG_EVERY == 0:
             payload = self._query(MSP_CMD.GET_ANALOG)
@@ -183,7 +187,7 @@ class FcStateEstimator:
                     updates["current_a"] = float(analog["current_a"])
                     updates["mah"] = int(analog["mah"])
                     updates["rssi"] = int(analog["rssi"])
-                    updates["analog_t"] = now
+                    updates["analog_t"] = time.monotonic()
                 else:
                     self._errors += 1
 
@@ -194,7 +198,7 @@ class FcStateEstimator:
                 if position is not None:
                     updates["position_enu"] = tuple(float(v) for v in position["position_enu"])
                     updates["velocity_enu"] = tuple(float(v) for v in position["velocity_enu"])
-                    updates["pos_t"] = now
+                    updates["pos_t"] = time.monotonic()
                     self._position_misses = 0
                 else:
                     self._errors += 1

@@ -4,6 +4,10 @@
 #   sudo bash scripts/pi5_install.sh
 Description=BF_Anti onboard runtime (camera, OSD, FB, FC link)
 Documentation=file://__INSTALL_DIR__/README.md
+# Runtime logs:
+#   journalctl -u bf-anti-onboard -b          (volatile unless persistent)
+#   __INSTALL_DIR__/logs/run_*/telemetry.csv  (blackbox, always on disk)
+# Run scripts/pi5_log_check.sh after boot to verify both.
 After=local-fs.target
 Wants=network-online.target
 After=network-online.target
@@ -17,7 +21,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 # Board account; must be in the video group for /dev/fb0 and /dev/video*.
-User=pi5
+User=__BOARD_USER__
 SupplementaryGroups=video dialout
 WorkingDirectory=__INSTALL_DIR__
 # Optional overrides: BF_ANTI_HOME / BF_ANTI_VENV / BF_ANTI_CONFIG.
@@ -26,12 +30,16 @@ Environment=PYTHONUNBUFFERED=1
 # There is no X11 on the aircraft; never let OpenCV try a GUI backend.
 Environment=DISPLAY=
 Environment=OPENCV_VIDEOIO_PRIORITY_V4L2=1
+# One identifier for journald and the blackbox run directory.
+SyslogIdentifier=bf-anti-onboard
+StandardOutput=journal
+StandardError=journal
 ExecStart=__INSTALL_DIR__/scripts/pi5_run_onboard.sh --config __INSTALL_DIR__/config/onboard.json
 
 # Restart only on failure. A clean SIGTERM stop (pilot disarm / maintenance)
 # must stay stopped instead of coming back up on its own.
 Restart=on-failure
-RestartSec=5
+RestartSec=3
 TimeoutStartSec=20
 TimeoutStopSec=20
 KillSignal=SIGTERM
@@ -41,6 +49,9 @@ KillSignal=SIGTERM
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
+# The runtime writes logs/run_* under the install dir.  If log_dir is moved
+# outside /home or /var, add it here or the blackbox will report EROFS.
+ReadWritePaths=__INSTALL_DIR__
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

@@ -1,4 +1,4 @@
-# BF_Anti — 反无人机视觉制导 + Betaflight MSP 飞控
+# BF_Anti Betaflight MSP 飞控
 
 [![Pi 5](https://img.shields.io/badge/Raspberry%20Pi-5%204GB-C51A4A)](https://www.raspberrypi.com/products/raspberry-pi-5/)
 [![Hailo](https://img.shields.io/badge/AI%20HAT%2B-Hailo--8L%2013TOPS-00A6FF)](https://hailo.ai/)
@@ -45,6 +45,7 @@ USB UVC 1280x720 MJPG
   -> RCMux (single MSP RC writer, 50 Hz)
   -> Betaflight (ARM + ANGLE + BOXMSPOVERRIDE)
   -> MSP telemetry (ATTITUDE/ALTITUDE/STATUS/RC/ANALOG)
+  -> Blackbox (logs/run_*/telemetry.csv + events.jsonl, 掉电安全)
   -> OSD -> /dev/fb0 (720x576 BGRA) -> J7 -> VTX -> goggles
 ~~~
 
@@ -61,7 +62,7 @@ USB UVC 1280x720 MJPG
 ### 快速命令
 
 ~~~bash
-# 本机单测（当前 350 项）
+# 本机单测（当前 388 项）
 python3 -m pytest -q
 
 # 协议自检（离线 / SITL TCP / 真机串口）
@@ -69,8 +70,9 @@ python3 tools/protocol_conformance.py --offline
 python3 tools/protocol_conformance.py --host 127.0.0.1 --tcp-port 5761
 
 # Pi5 只读体检 + 部署（在 Pi 上运行 install）
+# --enable-service: 开机自启；--persistent-journal: journald 日志跨重启保留
 bash scripts/pi5_bringup.sh --root /home/pi5/BF_Anti
-sudo bash scripts/pi5_install.sh
+sudo bash scripts/pi5_install.sh --enable-service --persistent-journal
 python3 -m onboard.app --config config/onboard.json
 
 # 实时 OSD 网页（Pi 上另开进程；本机浏览器打开 http://<Pi-IP>:8088/）
@@ -85,6 +87,98 @@ python3 -m onboard.app --config config/onboard.json
 python3 tools/hailo/check_env.py --role pi5
 python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef --frames 300
 ~~~
+
+### 运行日志（blackbox）
+
+开机自启后，每次服务启动都会在 `log_dir`（`config/onboard.json`，示例为
+`/home/pi5/bf_anti_logs`）下生成一个运行目录；**不依赖 journald 是否持久化**：
+
+~~~text
+/home/pi5/bf_anti_logs/
+  run_20261122_164721/
+    startup.json      # git sha、完整配置快照、boot_id、pid、起止时间、行数、io_error
+    telemetry.csv     # 飞控 / 遥控器 / 检测 / 控制指令，默认 10 Hz
+    events.jsonl      # 状态变化：armed、safety 门、目标出现/丢失、mux 模式、启动失败
+    runtime.log       # 人读日志（与 journald 同内容）
+    faulthandler.log  # 原生崩溃栈；kill -USR1 可主动导出
+  latest -> run_20261122_164721
+~~~
+
+`telemetry.csv` 的列（节选，完整顺序见 [`onboard/telemetry_log.py`](onboard/telemetry_log.py)）：
+
+| 组 | 列 | 说明 |
+|---|---|---|
+| 飞控 | `armed` `fc_mode` `roll/pitch/yaw_deg` `alt_m` `vario_mps` `voltage_v` `current_a` `mah` `rssi` | 来自 MSP 遥测；`*_age_s` 给出各字段新鲜度 |
+| 遥控器 | `rc_age_s` `rc0..rc15` | AETR + AUX1..AUX12；FC 未返回 MSP_RC 时**留空**，不补 1500 |
+| 检测 | `det_present` `det_conf` `det_class` `det_age_s` `det_x1..y2` `det_fps` `det_infer_ms` `det_errors` | 检测框、置信度、检测线程健康 |
+| 跟踪 | `track_locked` `track_streak` `track_miss` | 跟踪器是否确认/外推 |
+| 控制指令 | `cmd_valid` `cmd_mode` `cmd_reason` `cmd_roll/pitch/throttle/yaw` `cmd_range_m` | 伴机想写给 FC 的 RPYT 与制导状态 |
+| 安全/权限 | `allow_auto` `safety_reason` `safety_critical` `mux_mode` `mux_pos` `engaged` | 为什么没有放行、当前谁在控 |
+| 回路健康 | `loop_dt_s` `link_errors` | 50 Hz 回路是否超时、MSP 错误计数 |
+
+> 开机最初几行出现 `safety_reason=fc_warming_up`（且 `safety_critical=0`）是正常的：
+> 此时飞控数据尚未齐全，安全门只拒绝、**不锁存**；约 2 s 内会转为 `ok` 或
+> `target_unconfirmed`。只有 `latched:*` 才是需要飞手把模式开关回低再重新进入的故障。
+
+写入规则（都是为掉电/坏卡设计的）：
+
+- 控制环只入队，独立 writer 线程落盘；SD 卡慢或 fsync 阻塞**不会**拖垮 50 Hz 回路。
+- 行级 flush（约 1 s 一批）、每 5 s fsync；断电最多丢几秒，而不是整场。
+- `telemetry.csv` 超过 `max_file_mb`（默认 32 MB）自动轮转；只保留最近 `max_runs`（默认 20）次运行。
+- 空字段表示"从未收到"，不是 0；磁盘满/只读时自动降级为 journald，并在 `startup.json` 的 `io_error` 里留证据。
+
+~~~json
+"log_dir": "/home/pi5/bf_anti_logs",
+"telemetry": {
+  "enabled": true, "hz": 10, "max_file_mb": 32, "max_runs": 20,
+  "flush_interval_s": 1, "fsync_interval_s": 5, "level": "INFO"
+}
+~~~
+
+`hz` 是落盘频率，不是控制频率（默认 10 Hz 抽稀）；要逐 tick 记录 50 Hz 的完整控制指令，
+把 `hz` 设为 `0`。临时排查可加 `--no-telemetry`（只留 journald）或 `--log-dir /tmp/logs`。
+
+#### 开机后确认"到底记没记"
+
+~~~bash
+systemctl status bf-anti-onboard
+journalctl -u bf-anti-onboard -b --no-pager | tail -40   # 本次开机
+bash scripts/pi5_log_check.sh                            # 一键体检：unit/日志目录/行数/启动竞态
+python3 tools/log_summary.py --dir /home/pi5/bf_anti_logs --runs 1
+tail -f /home/pi5/bf_anti_logs/latest/telemetry.csv
+systemctl kill -s USR1 bf-anti-onboard                   # 卡住时导出 Python 栈
+~~~
+
+`log_summary.py` 会直接给出四路信号是否齐全：
+`飞控=ok/N 遥控器=ok/N 检测=ok/N 控制指令=ok/N`，缺哪一路就打印对应的排查方向。
+
+#### 为什么以前"开机后没有日志"
+
+按可能性排序，前三条是这次修复的重点：
+
+1. **只有 stderr，没有落盘文件。** 旧代码 `logging.basicConfig()` 只写 stderr，systemd 转进
+   journald；而 Ubuntu/RPi OS 的 journald 默认 `Storage=auto`，`/var/log/journal` 不存在时是
+   **易失**的，重启后 `journalctl -b -1` 为空。配置里的 `log_dir` 从来没有任何代码读取。
+   → 现在固定写 `run_*/telemetry.csv`；另可 `sudo bash scripts/pi5_enable_persistent_journal.sh`
+   让 journald 也持久化。
+2. **开机启动竞态把进程打死。** 开机瞬间 `/dev/fb0` 往往还没就绪（`DisplayPipeline.start()`
+   直接抛异常），HEF/HailoRT 初始化失败也会；进程退出后 systemd `StartLimitBurst=5` 在 60 s
+   内耗尽，**不再重启**，于是整场没有日志。FC 虽不会让进程退出，但旧逻辑会在缺乏数据时把
+   safety 锁存成 `rc_stale`，整场 `cmd_valid=0`（看起来就是"没有控制指令数据"）。
+   → 现在 `_start_with_retry()` 常驻重试（1→10 s 退避），每次失败写 `events.jsonl` 的
+   `startup_retry`；开机未收到完整 FC 数据时安全门只拒绝、不锁存。
+3. **原生库崩溃没有 Python traceback。** HailoRT/OpenCV 段错误会让进程直接消失。
+   → `faulthandler.log` 记录崩溃时的 Python 栈；`SIGUSR1` 可主动 dump。
+4. **服务没 enable / 用户权限。** `systemctl is-enabled bf-anti-onboard`；服务用户（安装时
+   `--user`，默认 `pi5`）需要 `video`/`dialout` 组；`ProtectSystem=full` 下 `log_dir` 必须在
+   `/home` 或 `/var`（unit 已 `ReadWritePaths=安装目录`）。
+5. **磁盘满 / SD 卡只读。** `df -h`；`startup.json` 的 `io_error` 会写明原因。
+
+> 状态：本机新增测试（[`tests/test_telemetry_log.py`](tests/test_telemetry_log.py)、
+> [`tests/test_onboard_telemetry.py`](tests/test_onboard_telemetry.py)、
+> [`tests/test_log_summary.py`](tests/test_log_summary.py)）全部通过；
+> **Pi5 真机开机落盘尚未复测**。首次上机请先跑 `scripts/pi5_log_check.sh`，并保留
+> `run_*/startup.json` 作为“代码版本 + 配置 + boot_id”的证据。
 
 ### 硬件与证据边界
 
@@ -368,7 +462,7 @@ Gazebo/Betaflight SITL 下的**纯比例（P-only）视觉制导**打击闭环�
 稳定性根因与修复 · 检测后端实测对比。
 
 ```bash
-# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 350 项）
+# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 388 项）
 python3 -m pytest -q
 
 # 运动学包线：静态/径向目标命中，横向匀速目标记录滞后

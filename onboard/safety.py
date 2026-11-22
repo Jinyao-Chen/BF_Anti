@@ -34,6 +34,15 @@ class SafetyInputs:
     battery_v: float = 0.0
     detector_ok: bool = True
     estop: bool = False
+    # True once every required FC signal (link/att/alt/rc/status) arrived at
+    # least once.  Before that the gate denies but must NOT latch: a FC that
+    # has not enumerated yet at boot is not a flight fault, and latching it
+    # would keep the gate closed for the whole sortie.
+    fc_seen: bool = True
+    # After the first complete FC sample, tolerate a short startup window in
+    # which a stale field denies auto but does not latch.  A slow first MSP
+    # exchange is a boot artefact, not a fault the pilot must acknowledge.
+    warmup_grace: bool = False
 
 
 @dataclass
@@ -76,16 +85,22 @@ class SafetySupervisor:
         c = self.cfg
         if inp.estop:
             return self._critical("estop")
+        if not inp.fc_seen:
+            return self._deny("fc_warming_up")
+
+        def stale(reason: str) -> SafetyDecision:
+            return self._deny(reason) if inp.warmup_grace else self._critical(reason)
+
         if inp.link_age_s > c.max_status_age_s:
-            return self._critical("fc_link_stale")
+            return stale("fc_link_stale")
         if inp.rc_age_s > c.max_rc_age_s:
-            return self._critical("rc_stale")
+            return stale("rc_stale")
         if inp.att_age_s > c.max_att_age_s:
-            return self._critical("att_stale")
+            return stale("att_stale")
         if inp.alt_age_s > c.max_alt_age_s:
-            return self._critical("alt_stale")
+            return stale("alt_stale")
         if inp.status_age_s > c.max_status_age_s:
-            return self._critical("status_stale")
+            return stale("status_stale")
         if inp.loop_dt_s > c.max_loop_dt_s:
             return self._critical("loop_overrun")
         if c.min_battery_v > 0.0 and 0.0 < inp.battery_v < c.min_battery_v:

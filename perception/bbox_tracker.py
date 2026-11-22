@@ -90,6 +90,19 @@ class BboxTracker:
             return None
         return (float(self._v[0]), float(self._v[1]))
 
+    @property
+    def locked(self) -> bool:
+        """True once the track reached confirm_frames (used by the blackbox)."""
+        return self._c is not None and self._streak >= self.confirm_frames
+
+    @property
+    def streak(self) -> int:
+        return int(self._streak)
+
+    @property
+    def misses(self) -> int:
+        return int(self._miss)
+
     # ------------------------------------------------------------------ #
     def update(self, det: Optional[BBox], dt: float = 1.0,
                timestamp: Optional[float] = None) -> TrackOut:

@@ -1,6 +1,15 @@
 {
   "profile": "real_pn8_angle",
   "log_dir": "/home/pi5/bf_anti_logs",
+  "telemetry": {
+    "enabled": true,
+    "hz": 10,
+    "max_file_mb": 32,
+    "max_runs": 20,
+    "flush_interval_s": 1,
+    "fsync_interval_s": 5,
+    "level": "INFO"
+  },
   "fc": {
     "port": "/dev/ttyACM0",
     "baud": 115200,

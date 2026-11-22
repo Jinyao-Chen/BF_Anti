@@ -1,6 +1,4 @@
 """Safety supervisor: fail closed, latch critical faults, allow only fresh data."""
-from dataclasses import replace
-
 from onboard.config import SafetyConfig
 from onboard.safety import SafetyInputs, SafetySupervisor
 
@@ -81,3 +79,31 @@ def test_battery_threshold_only_applies_when_configured():
     sup = SafetySupervisor(SafetyConfig(min_battery_v=13.6), True, True)
     dec = sup.evaluate(fresh(battery_v=13.0))
     assert dec.critical and dec.reason == "CRITICAL:battery_low"
+
+
+def test_boot_warmup_denies_without_latching():
+    sup = SafetySupervisor(SafetyConfig(), True, True)
+    warming = fresh(
+        fc_seen=False,
+        rc_age_s=float("inf"),
+        att_age_s=float("inf"),
+        alt_age_s=float("inf"),
+        status_age_s=float("inf"),
+        link_age_s=float("inf"),
+    )
+    dec = sup.evaluate(warming)
+    assert not dec.allow_auto
+    assert not dec.critical
+    assert dec.reason == "fc_warming_up"
+    # The onboard thread must not have latched a boot-time fault.
+    assert sup.evaluate(fresh()).allow_auto
+
+
+def test_warmup_grace_denies_stale_without_latching():
+    sup = SafetySupervisor(SafetyConfig(), True, True)
+    dec = sup.evaluate(fresh(warmup_grace=True, rc_age_s=1.0))
+    assert not dec.allow_auto
+    assert not dec.critical
+    assert dec.reason == "rc_stale"
+    # Grace expires: no latch was set, so fresh data is allowed immediately.
+    assert sup.evaluate(fresh()).allow_auto
