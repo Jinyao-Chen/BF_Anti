@@ -596,7 +596,9 @@ class TelemetryLog:
 
         # Sort by creation time, not name: an unsynced clock produces
         # run_unsynced_* names that would otherwise sort after dated runs.
-        entries.sort(key=_mtime)
+        # mtime is the primary key; the run name is a deterministic tie-breaker
+        # when several directories are created inside the same filesystem tick.
+        entries.sort(key=lambda name: (_mtime(name), name))
         # Keep max_runs-1 so the new run does not push the count over.
         while len(entries) >= self.max_runs:
             victim = entries.pop(0)
