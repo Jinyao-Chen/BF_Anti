@@ -1,4 +1,4 @@
-# BF_Anti Betaflight MSP 飞控
+# BF_Anti — 反无人机视觉制导 + Betaflight MSP 飞控
 
 [![Pi 5](https://img.shields.io/badge/Raspberry%20Pi-5%204GB-C51A4A)](https://www.raspberrypi.com/products/raspberry-pi-5/)
 [![Hailo](https://img.shields.io/badge/AI%20HAT%2B-Hailo--8L%2013TOPS-00A6FF)](https://hailo.ai/)
@@ -6,17 +6,20 @@
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-FFB300)](https://github.com/ultralytics/ultralytics)
 
 > **当前主线：Raspberry Pi 5 4GB + AI HAT+ Hailo-8L (13 TOPS)**。
-> USB 相机 → Hailo YOLOv8 → 跟踪/纯 P 制导 → MSP 覆盖 RPYT → Betaflight；
+> USB 相机 → Hailo YOLOv8 → 跟踪/纯 P+PN 制导 → MSP 覆盖 RPYT → Betaflight；
 > J7 复合视频 (720x576i PAL) 直接进 VTX/眼镜，不走 HDMI 转换器。
-> 旧的 RDK X5 + Pico 链路保留在仓库中作参考，见 §旧版 RDK X5 链路。
+>
+> **飞行日志**：开机自启后，每次服务启动都会在 log_dir 下生成
+> run_*/telemetry.csv + events.jsonl + startup.json + runtime.log；异步落盘，
+> 不阻塞 50 Hz 控制环。详见 §运行日志（伴机 blackbox）。
 
 仓库里有三条链路，别混淆：
 
 | 链路 | 跑在哪 | 入口 | 说明 |
 |------|--------|------|------|
-| **Pi5 机载（主线）** | Pi 5 + Hailo-8L + Betaflight FC | [`onboard/app.py`](onboard/app.py) | 相机/检测/制导/OSD/图传；相机已接、FC 未接；DFC 已本地安装，见 §Pi5 机载（sim2real） |
-| **SITL 仿真** | PC + Gazebo Harmonic + Betaflight SITL | [`sim/run_p_vision_strike.py`](sim/run_p_vision_strike.py) | 纯 P 视觉制导打击，见 §纯 P 视觉制导打击 与 [`sim/README.md`](sim/README.md) |
-| **旧版 RDK X5** | RDK X5 + Pico | [`detect.py`](legacy/rdk_x5_pico/detect.py) / [`run_detect.sh`](legacy/rdk_x5_pico/run_detect.sh) | BPU .bin 推理 + SPI PAL；已归档到 legacy/rdk_x5_pico/ |
+| **Pi5 机载（主线）** | Pi 5 + Hailo-8L + Betaflight FC | [onboard/app.py](onboard/app.py) | 相机/检测/制导/OSD/图传 + 伴机飞行日志；见 §Pi5 机载（sim2real） |
+| **SITL 仿真** | PC + Gazebo Harmonic + Betaflight SITL | [sim/run_p_vision_strike.py](sim/run_p_vision_strike.py) | 纯 P 视觉制导打击，见 §纯 P 视觉制导打击 与 [sim/README.md](sim/README.md) |
+| **旧版 RDK X5** | RDK X5 + Pico | [legacy/rdk_x5_pico/detect.py](legacy/rdk_x5_pico/detect.py) | BPU .bin 推理 + SPI PAL；已归档到 legacy/rdk_x5_pico/ |
 
 ---
 
@@ -28,10 +31,14 @@
 |---|---|---|
 | 机载电脑 | Raspberry Pi 5 Model B 4GB | 已实测 |
 | NPU | AI HAT+ Hailo-8L 13 TOPS (HAILO8L) | 已实测，HailoRT 4.23.0 |
-| 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已接；实际约 25 fps；相机已放平，rotate_deg=0；FOV/tilt 待标定 |
-| 飞控 | Betaflight 4.5.3, S405 / OMNIBUSF4SD | **已接** USB `/dev/ttyACM0`；MSP override 已配置；当前 `RX_MSP`（无 CRSF 串行接收机）、`RX_FAILSAFE`、电池未接 |
-| 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；目视未验 |
-| 模型 | YOLOv8n 1-class drone -> Hailo HEF | **128 帧真实相机校准 HEF 已在 Pi5 parse/run**；bench p50 16.21 ms，61.7 fps |
+| 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已实测约 25 fps；FOV/tilt 需按实机标定 |
+| 飞控 | Betaflight 4.5.3, S405 / OMNIBUSF4SD | USB /dev/ttyACM0；UART3 CRSF；msp_override_channels_mask=15；RATE/ACTUAL 600/600/300 |
+| 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；眼镜目视需现场确认 |
+| 模型 | YOLOv8n 1-class drone -> Hailo HEF | HEF 已在 Pi5 parse/run；实测 infer p50 约 19.5 ms、detector 约 51 fps |
+
+> 仓库示例配置是 real_pn8_angle；RATE 使用 real_pn8_rate /
+> control.att_mode=rate / BF ACTUAL 600/600/300。实际飞行以部署的
+> config/onboard.json 和 run_*/startup.json 为准。
 
 ### 数据流
 
@@ -43,26 +50,28 @@ USB UVC 1280x720 MJPG
   -> SafetySupervisor (ARM/AUX freshness/altitude/loop)
   -> PVisualGuidance (P + PN, closing speed source)
   -> RCMux (single MSP RC writer, 50 Hz)
-  -> Betaflight (ARM + ANGLE + BOXMSPOVERRIDE)
+  -> Betaflight (ARM + ANGLE/ACRO + BOXMSPOVERRIDE)
   -> MSP telemetry (ATTITUDE/ALTITUDE/STATUS/RC/ANALOG)
-  -> Blackbox (logs/run_*/telemetry.csv + events.jsonl, 掉电安全)
   -> OSD -> /dev/fb0 (720x576 BGRA) -> J7 -> VTX -> goggles
+  -> flight log (async queue -> run_*/telemetry.csv, events.jsonl)
 ~~~
 
 ### 关键约束
 
-- 飞手拥有 ARM / ANGLE / BOXMSPOVERRIDE / 切入开关；伴机只写 RPYT，**绝不命令 AUX/ARM**。
+- 飞手拥有 ARM / ANGLE 或 ACRO / BOXMSPOVERRIDE / 三档模式开关；伴机只写 RPYT，
+  **绝不命令 AUX/ARM**。
 - 任何 RC/姿态/高度/链路过期、回路超时、目标丢失、低电量/高度/距离越界 → 立即回 PASSTHROUGH；
-  关键故障锁存，需飞手把切入开关回低再重新进入。
-- 第一版真机只用 ANGLE + BOXMSPOVERRIDE + 伴机 RPYT + 直接油门；
-  不用 ALT_HOLD / POS_HOLD / offboard / GPS rescue。
+  关键故障锁存，需飞手把模式开关回低再重新进入。
+- 默认示例使用 ANGLE；RATE/ACRO 必须同时匹配 BF 的 aux（无 ANGLE）、ACTUAL 600/600/300
+  和机载 att_mode=rate。只改一边会造成“伴机发角速率、BF 按角度解释”的危险错配。
 - 无 GPS/光流：制导用 speed_source=closing，水平位置/速度不参与；高度用 MSP_ALTITUDE。
 - 相机 tilt/yaw、FC 板卡、AUX 映射、电池阈值必须实测后写入 config/onboard.json；不要猜。
+- 伴机绝不自动解锁；CH8 低位是硬件 CRSF 直通，也是伴机异常时的第一动作。
 
 ### 快速命令
 
 ~~~bash
-# 本机单测（当前 388 项）
+# 本机单测（当前 401 项）
 python3 -m pytest -q
 
 # 协议自检（离线 / SITL TCP / 真机串口）
@@ -71,16 +80,19 @@ python3 tools/protocol_conformance.py --host 127.0.0.1 --tcp-port 5761
 
 # Pi5 只读体检 + 部署（在 Pi 上运行 install）
 # --enable-service: 开机自启；--persistent-journal: journald 日志跨重启保留
-bash scripts/pi5_bringup.sh --root /home/pi5/BF_Anti
+bash scripts/pi5_bringup.sh --root "$HOME/BF_Anti"
 sudo bash scripts/pi5_install.sh --enable-service --persistent-journal
 python3 -m onboard.app --config config/onboard.json
+
+# 从开发机同步部署
+PI_HOST=<pi-user>@<pi-ip> bash scripts/deploy_pi5.sh
 
 # 实时 OSD 网页（Pi 上另开进程；本机浏览器打开 http://<Pi-IP>:8088/）
 .venv/bin/python scripts/pi5_osd_stream.py --fb /dev/fb0 --port 8088
 
 # FC 姿态符号检查（只读；Pi 上跑，本机用 SSH 隧道看）
 .venv/bin/python scripts/fc_attitude_viewer.py --port /dev/ttyACM0 --http-port 8090
-# 本机：ssh -N -L 8090:127.0.0.1:8090 pi5@10.42.0.228
+# 本机：ssh -N -L 8090:127.0.0.1:8090 <pi-user>@<pi-ip>
 # 浏览器：http://127.0.0.1:8090/
 
 # Hailo 工具
@@ -88,120 +100,93 @@ python3 tools/hailo/check_env.py --role pi5
 python3 tools/hailo/bench_hef.py --hef /usr/share/hailo-models/yolov8s_h8l.hef --frames 300
 ~~~
 
-### 运行日志（blackbox）
+### 运行日志（伴机 blackbox）
 
-开机自启后，每次服务启动都会在 `log_dir`（`config/onboard.json`，示例为
-`/home/pi5/bf_anti_logs`）下生成一个运行目录；**不依赖 journald 是否持久化**：
+这里的“blackbox”指**伴机侧飞行日志**，不是 Betaflight 的 FC blackbox。
+开机自启后，每次服务启动都会在 log_dir（配置项，示例 logs 或 ~/bf_anti_logs）
+下生成一个 run 目录；不依赖 journald 是否持久化：
 
 ~~~text
-/home/pi5/bf_anti_logs/
-  run_20261122_164721/
-    startup.json      # git sha、完整配置快照、boot_id、pid、起止时间、行数、io_error
-    telemetry.csv     # 飞控 / 遥控器 / 检测 / 控制指令，默认 10 Hz
-    events.jsonl      # 状态变化：armed、safety 门、目标出现/丢失、mux 模式、启动失败
+<log_dir>/
+  run_YYYYmmdd_HHMMSS/
+    startup.json      # git sha、配置快照、boot_id、pid、起止时间、行数、io_error
+    telemetry.csv     # 飞控 / 遥控器 / 检测 / 跟踪 / 控制指令，默认 10 Hz
+    events.jsonl      # armed、safety 门、目标出现/丢失、mux 模式、启动失败
     runtime.log       # 人读日志（与 journald 同内容）
-    faulthandler.log  # 原生崩溃栈；kill -USR1 可主动导出
-  latest -> run_20261122_164721
+    faulthandler.log  # 原生崩溃栈；SIGUSR1 可主动导出
+  latest -> run_YYYYmmdd_HHMMSS
 ~~~
 
-`telemetry.csv` 的列（节选，完整顺序见 [`onboard/telemetry_log.py`](onboard/telemetry_log.py)）：
+telemetry.csv 主要列：
 
 | 组 | 列 | 说明 |
 |---|---|---|
-| 飞控 | `armed` `fc_mode` `roll/pitch/yaw_deg` `alt_m` `vario_mps` `voltage_v` `current_a` `mah` `rssi` | 来自 MSP 遥测；`*_age_s` 给出各字段新鲜度 |
-| 遥控器 | `rc_age_s` `rc0..rc15` | AETR + AUX1..AUX12；FC 未返回 MSP_RC 时**留空**，不补 1500 |
-| 检测 | `det_present` `det_conf` `det_class` `det_age_s` `det_x1..y2` `det_fps` `det_infer_ms` `det_errors` | 检测框、置信度、检测线程健康 |
-| 跟踪 | `track_locked` `track_streak` `track_miss` | 跟踪器是否确认/外推 |
-| 控制指令 | `cmd_valid` `cmd_mode` `cmd_reason` `cmd_roll/pitch/throttle/yaw` `cmd_range_m` | 伴机想写给 FC 的 RPYT 与制导状态 |
-| 安全/权限 | `allow_auto` `safety_reason` `safety_critical` `mux_mode` `mux_pos` `engaged` | 为什么没有放行、当前谁在控 |
-| 回路健康 | `loop_dt_s` `link_errors` | 50 Hz 回路是否超时、MSP 错误计数 |
+| 飞控 | armed, fc_mode, roll/pitch/yaw_deg, alt_m, vario_mps, voltage_v, current_a, mah, rssi | MSP 遥测；*_age_s 是新鲜度 |
+| 遥控器 | rc_age_s, rc0..rc15 | AETR + AUX1..AUX12；未收到时留空，不补 1500 |
+| 检测 | det_present, det_conf, det_class, det_age_s, det_x1..y2, det_fps, det_infer_ms, det_errors | 检测框与检测线程健康 |
+| 跟踪 | track_locked, track_streak, track_miss | 确认/外推状态 |
+| 控制指令 | cmd_valid, cmd_mode, cmd_reason, cmd_roll/pitch/throttle/yaw, cmd_range_m | 伴机想写的 RPYT 与制导状态 |
+| 安全/权限 | allow_auto, safety_reason, safety_critical, mux_mode, mux_pos, engaged | 为什么没有放行、谁在控 |
+| 回路健康 | loop_dt_s, link_errors | 50 Hz 回路是否超时、MSP 错误计数 |
 
-> 开机最初几行出现 `safety_reason=fc_warming_up`（且 `safety_critical=0`）是正常的：
-> 此时飞控数据尚未齐全，安全门只拒绝、**不锁存**；约 2 s 内会转为 `ok` 或
-> `target_unconfirmed`。只有 `latched:*` 才是需要飞手把模式开关回低再重新进入的故障。
+写入规则：
 
-写入规则（都是为掉电/坏卡设计的）：
+- 控制环只入队，独立 writer 线程格式化、flush、fsync；SD 卡慢或 fsync 阻塞**不会**
+  拖垮 50 Hz 控制环；队列满时丢行并计数。
+- 约 1 s 一批 flush，每 5 s fsync；断电最多丢几秒。
+- telemetry.csv 超过 max_file_mb（默认 32 MB）轮转；只保留最近 max_runs
+  （默认 20）次运行；磁盘满/只读时降级为 journald，并在 startup.json.io_error 留证。
+- 空字段表示“从未收到”，不是 0。
 
-- 控制环只入队，独立 writer 线程落盘；SD 卡慢或 fsync 阻塞**不会**拖垮 50 Hz 回路。
-- 行级 flush（约 1 s 一批）、每 5 s fsync；断电最多丢几秒，而不是整场。
-- `telemetry.csv` 超过 `max_file_mb`（默认 32 MB）自动轮转；只保留最近 `max_runs`（默认 20）次运行。
-- 空字段表示"从未收到"，不是 0；磁盘满/只读时自动降级为 journald，并在 `startup.json` 的 `io_error` 里留证据。
+配置示例：
 
 ~~~json
-"log_dir": "/home/pi5/bf_anti_logs",
+"log_dir": "logs",
 "telemetry": {
   "enabled": true, "hz": 10, "max_file_mb": 32, "max_runs": 20,
   "flush_interval_s": 1, "fsync_interval_s": 5, "level": "INFO"
 }
 ~~~
 
-`hz` 是落盘频率，不是控制频率（默认 10 Hz 抽稀）；要逐 tick 记录 50 Hz 的完整控制指令，
-把 `hz` 设为 `0`。临时排查可加 `--no-telemetry`（只留 journald）或 `--log-dir /tmp/logs`。
+hz 是落盘频率，不是控制频率；设为 0 记录每个 tick。临时排查可加
+--no-telemetry（只留 journald）或 --log-dir /tmp/logs。
 
-#### 开机后确认"到底记没记"
+#### 开机后确认“到底记没记”
 
 ~~~bash
 systemctl status bf-anti-onboard
-journalctl -u bf-anti-onboard -b --no-pager | tail -40   # 本次开机
-bash scripts/pi5_log_check.sh                            # 一键体检：unit/日志目录/行数/启动竞态
-python3 tools/log_summary.py --dir /home/pi5/bf_anti_logs --runs 1
-tail -f /home/pi5/bf_anti_logs/latest/telemetry.csv
-systemctl kill -s USR1 bf-anti-onboard                   # 卡住时导出 Python 栈
+journalctl -u bf-anti-onboard -b --no-pager | tail -40
+bash scripts/pi5_log_check.sh
+python3 tools/log_summary.py --dir <log_dir> --runs 1
+tail -f <log_dir>/latest/telemetry.csv
+systemctl kill -s USR1 bf-anti-onboard   # 卡住时导出 Python 栈
 ~~~
 
-`log_summary.py` 会直接给出四路信号是否齐全：
-`飞控=ok/N 遥控器=ok/N 检测=ok/N 控制指令=ok/N`，缺哪一路就打印对应的排查方向。
+log_summary.py 会给出四路信号是否齐全：
+飞控=ok/N 遥控器=ok/N 检测=ok/N 控制指令=ok/N，缺哪一路会打印排查方向。
 
-#### 为什么以前"开机后没有日志"
-
-按可能性排序，前三条是这次修复的重点：
-
-1. **只有 stderr，没有落盘文件。** 旧代码 `logging.basicConfig()` 只写 stderr，systemd 转进
-   journald；而 Ubuntu/RPi OS 的 journald 默认 `Storage=auto`，`/var/log/journal` 不存在时是
-   **易失**的，重启后 `journalctl -b -1` 为空。配置里的 `log_dir` 从来没有任何代码读取。
-   → 现在固定写 `run_*/telemetry.csv`；另可 `sudo bash scripts/pi5_enable_persistent_journal.sh`
-   让 journald 也持久化。
-2. **开机启动竞态把进程打死。** 开机瞬间 `/dev/fb0` 往往还没就绪（`DisplayPipeline.start()`
-   直接抛异常），HEF/HailoRT 初始化失败也会；进程退出后 systemd `StartLimitBurst=5` 在 60 s
-   内耗尽，**不再重启**，于是整场没有日志。FC 虽不会让进程退出，但旧逻辑会在缺乏数据时把
-   safety 锁存成 `rc_stale`，整场 `cmd_valid=0`（看起来就是"没有控制指令数据"）。
-   → 现在 `_start_with_retry()` 常驻重试（1→10 s 退避），每次失败写 `events.jsonl` 的
-   `startup_retry`；开机未收到完整 FC 数据时安全门只拒绝、不锁存。
-3. **原生库崩溃没有 Python traceback。** HailoRT/OpenCV 段错误会让进程直接消失。
-   → `faulthandler.log` 记录崩溃时的 Python 栈；`SIGUSR1` 可主动 dump。
-4. **服务没 enable / 用户权限。** `systemctl is-enabled bf-anti-onboard`；服务用户（安装时
-   `--user`，默认 `pi5`）需要 `video`/`dialout` 组；`ProtectSystem=full` 下 `log_dir` 必须在
-   `/home` 或 `/var`（unit 已 `ReadWritePaths=安装目录`）。
-5. **磁盘满 / SD 卡只读。** `df -h`；`startup.json` 的 `io_error` 会写明原因。
-
-> 状态：本机新增测试（[`tests/test_telemetry_log.py`](tests/test_telemetry_log.py)、
-> [`tests/test_onboard_telemetry.py`](tests/test_onboard_telemetry.py)、
-> [`tests/test_log_summary.py`](tests/test_log_summary.py)）全部通过；
-> **Pi5 真机开机落盘尚未复测**。首次上机请先跑 `scripts/pi5_log_check.sh`，并保留
-> `run_*/startup.json` 作为“代码版本 + 配置 + boot_id”的证据。
+> **Betaflight blackbox 是另一套东西**：需要在 FC 上 feature BLACKBOX，并有
+> SD 卡或 dataflash；它记录 gyro/setpoint/RC/motor 等 FC 高频数据，不记录伴机的
+> YOLO/制导。两者可以同时开，互为补充。
+>
+> 状态：伴机日志代码与 401 项测试已合入；**Pi5 真机开机落盘尚未复测**。首次上机
+> 先跑 scripts/pi5_log_check.sh，并保留 run_*/startup.json 作为代码版本/配置/boot_id
+> 证据。
 
 ### 硬件与证据边界
 
-- 已实测：Pi5 J7 PAL 720x576i、fb0 BGRA 写入、HailoRT 4.23 + HAILO8L 识别、
-  预编译 yolov8s HEF 100 帧、OSD+DisplayPipeline 25 FPS/6.5 ms 渲染、SITL MSP 协议 12 项通过。
-- 相机已接：/dev/video0（05a3:9230）MJPG 1280x720，CSV 实测约 25 fps；CameraSource rotate_deg=0
-  后输出 1280x720，HailoDetector 约 51 fps、单帧推理约 19.4 ms，0 errors。
-- 自编 HEF 已在 Pi5 验证：hailortcli parse-hef 显示 HAILO8L + 1-class NMS；hailortcli run
-  100 帧 HW Latency 14.89 ms，芯片 31.3 C。
-- 已用真实 Pi 相机帧生成 128 帧校准集（100% real_pi_camera），自编 HEF 在 Pi5 parse/run：
-  parse-hef HAILO8L + 1-class NMS；bench 200 帧 p50 16.21 ms、p95 16.26 ms、61.7 infer fps。
-  OSD 实测截图见 `build/camera_local/fb0_pi128.png`；当前场景墙面出现 0.31 的框，属未验证/疑似
-  误报，不作为精度结论。
-- FC 已接入并完成只读+配置检查：S405/OMNIBUSF4SD，Betaflight 4.5.3，`/dev/ttyACM0`；
-  `msp_override_channels_mask=15`、`msp_override_failsafe=ON`，AUX1=ARM、AUX2=ANGLE、AUX3=MSP OVERRIDE；
-  16 通道 RC round-trip max diff 0，协议 12 pass / 0 fail（attitude_sign 仍需实机倾斜，MSP2 position 不支持）。
-- 但 FC 当前 `feature` 是 **RX_MSP**（`RX_SERIAL` 关闭），三路 UART 都没有 serial RX；`serialrx_provider=CRSF`
-  只是未生效的配置。RC round-trip 验证的是 MSP 输入，不是飞手 CRSF 接收机。
-- 手动姿态测试：ROLL + = 右翼下压、YAW 向左减小；PITCH 的 Betaflight 原始符号是 + = 低头，
-  已在 `onboard/fc/state.py` 转为 + = 抬头，OSD/guidance 使用航空约定。
-- 当前 FC 仍报 `RX_FAILSAFE`，且 `0S battery - NOT PRESENT`；接收机/电池/拆桨电机 A/B/飞行未验。
-- 未实测（阻塞）：CRSF 接收机接入与 UART 配置、飞手 ARM/ANGLE/OVERRIDE 独立开关、拆桨电机 A/B、
-  目标检测精度、1024 帧校准、J7 目视、飞行。不要把这些写成已通过。
+- 已实测：Pi5 J7 PAL 720x576i、fb0 BGRA 写入、HailoRT 4.23 + HAILO8L、自编 HEF
+  parse/run（infer p50 约 19.5 ms、detector 约 51 fps）、OSD/DisplayPipeline 约 25 fps、
+  SITL MSP 协议 12 项通过。
+- 相机：/dev/video0（05a3:9230）MJPG 1280x720，实测约 25 fps；FOV/tilt 仍需实机标定。
+- 飞控：S405/OMNIBUSF4SD，Betaflight 4.5.3，USB /dev/ttyACM0；UART3 CRSF；
+  msp_override_channels_mask=15；AUX1=ARM，CH8=MSP OVERRIDE；RATE 时无 ANGLE 范围，
+  ACTUAL 600/600/300。接收机链路、电池、电机方向和试飞状态以现场和 run_*/telemetry.csv
+  为准，不把未复测写成已通过。
+- 姿态符号：ROLL + = 右翼下压、YAW 向左减小；Betaflight PITCH + = 低头，已在
+  onboard/fc/state.py 转为 + = 抬头，OSD/guidance 使用航空约定。
+- J7/VTX/眼镜：fb0 已实测，目视链路仍需现场确认；不要把“有截图”当成“眼镜已通过”。
+
 
 ---
 
@@ -270,6 +255,7 @@ USB 相机 ──▶ RDK X5 ── BPU 推理 ── YOLO 检测框
 ```
 BF_Anti/
 ├── onboard/                  Pi5 机载主线: app/camera/controller/safety/fc/detector/video
+│                              telemetry_log.py（异步飞行日志）/ logging_setup.py
 ├── config/                   onboard.example.json + profiles/*.json
 ├── tools/                    protocol_conformance / fw_motor_ab / hailo/*
 ├── systemd/                  bf-anti-onboard.service
@@ -287,9 +273,10 @@ BF_Anti/
 ├── modeling/                 理论模型与整定（四旋翼、高度环、PID）
 ├── sim/                      Gazebo SITL 仿真工作区 -> 见 sim/README.md
 ├── docs/                     文档（本地保留、未纳入版本控制；见 .gitignore）
-├── tests/                    单元测试（350 项）
+├── tests/                    单元测试（401 项）
 └── scripts/
     ├── pi5_bringup.sh / pi5_install.sh / pi5_run_onboard.sh
+    ├── pi5_log_check.sh / pi5_enable_persistent_journal.sh
     ├── pi5_composite_check.sh / pi5_camera_probe.py
     ├── fc_identify.py / rc_monitor.py / test_msp_override.py
     └── legacy 脚本已移到 legacy/rdk_x5_pico/scripts/
@@ -462,7 +449,7 @@ Gazebo/Betaflight SITL 下的**纯比例（P-only）视觉制导**打击闭环�
 稳定性根因与修复 · 检测后端实测对比。
 
 ```bash
-# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 388 项）
+# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 401 项）
 python3 -m pytest -q
 
 # 运动学包线：静态/径向目标命中，横向匀速目标记录滞后
@@ -530,4 +517,4 @@ GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index
 | `sim/results/` | 验证数据（`.csv`/`.png`）；复盘报告 `*.md` 为本地文档 |
 
 代码规范：Python 以 `python3 -m flake8 --select=E9,F63,F7,F82,F401,F841,E722,W605` 零告警为准，
-`python3 -m pytest -q` 全绿（当前 350 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
+`python3 -m pytest -q` 全绿（当前 401 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
