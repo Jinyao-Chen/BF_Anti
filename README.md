@@ -171,9 +171,10 @@ log_summary.py 会给出四路信号是否齐全：
 > SD 卡或 dataflash；它记录 gyro/setpoint/RC/motor 等 FC 高频数据，不记录伴机的
 > YOLO/制导。两者可以同时开，互为补充。
 >
-> 状态：伴机日志代码与 412 项测试已合入；**Pi5 真机开机落盘尚未复测**。首次上机
-> 先跑 scripts/pi5_log_check.sh，并保留 run_*/startup.json 作为代码版本/配置/boot_id
-> 证据。
+> 状态：伴机日志代码与 412 项测试已合入；**Pi5 真机开机落盘已于 2026-11-23 复测**
+> （重启后服务自启，run_*/telemetry.csv 持续写入）。首次上机仍先跑
+> scripts/pi5_log_check.sh，并保留 run_*/startup.json 作为代码版本/配置/boot_id 证据。
+> 当前 Pi 的相机/FC USB 尚未枚举，需插好后再确认 /dev/video0 与 /dev/ttyACM0。
 
 ### RC 软关机（Pi 5 断电保护）
 

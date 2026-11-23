@@ -55,7 +55,7 @@ run_ssh "chmod +x '$PREFIX'/scripts/*.sh '$PREFIX'/scripts/*.py 2>/dev/null || t
 say "3. config"
 if [ -f "$SOURCE/config/onboard.pi5.json" ]; then
   # Keep the previous aircraft config for post-flight comparison.
-  run_ssh "if [ -f '$PREFIX/config/onboard.json' ]; then cp '$PREFIX/config/onboard.json' '$PREFIX/config/onboard.json.bak.\$(date +%Y%m%d-%H%M%S)'; fi"
+  run_ssh "if [ -f '$PREFIX/config/onboard.json' ]; then cp '$PREFIX/config/onboard.json' '$PREFIX/config/onboard.json.bak.'\$(date +%Y%m%d-%H%M%S); fi"
   rsync -a -e "ssh $SSH_OPTS" "$SOURCE/config/onboard.pi5.json" "$PI_HOST:$PREFIX/config/onboard.json"
   echo "installed config/onboard.pi5.json -> config/onboard.json"
 elif ! run_ssh "test -f '$PREFIX/config/onboard.json'"; then
