@@ -227,10 +227,35 @@ class TelemetryConfig:
 
 
 @dataclass(frozen=True)
+class PowerConfig:
+    """RC-controlled graceful shutdown (Pi 5 has no power-loss protection).
+
+    aux_channel is a 0-based AETR index: 6 = CH7/AUX3.  -1 disables the
+    feature.  The guard only fires after a low->high edge, with the FC
+    disarmed, throttle at idle, fresh RC/status data, and the channel held
+    high for hold_s.  It never cuts power itself; it asks systemd to halt so
+    the blackbox and SD card are flushed before the pack is unplugged.
+    """
+
+    aux_channel: int = -1
+    hold_s: float = 2.0
+    require_disarmed: bool = True
+    max_throttle: int = 1100
+    max_rc_age_s: float = 0.30
+    max_status_age_s: float = 0.60
+    high_threshold: int = 1700
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PowerConfig":
+        return cls(**_pick(cls, data))
+
+
+@dataclass(frozen=True)
 class AppConfig:
     profile: str = ""
     log_dir: str = "logs"
     fc: FcConfig = field(default_factory=FcConfig)
+    power: PowerConfig = field(default_factory=PowerConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     guidance: GuidanceConfig = field(default_factory=GuidanceConfig)
@@ -245,6 +270,7 @@ class AppConfig:
             profile=str(data.get("profile", "")),
             log_dir=str(data.get("log_dir", "logs")),
             fc=FcConfig.from_dict(data.get("fc", {})),
+            power=PowerConfig.from_dict(data.get("power", {})),
             camera=CameraConfig.from_dict(data.get("camera", {})),
             detector=DetectorConfig.from_dict(data.get("detector", {})),
             guidance=GuidanceConfig.from_dict(data.get("guidance", {})),
@@ -291,6 +317,18 @@ class AppConfig:
                 raise ValueError("aux_angle and aux_engage must be distinct")
         elif len(set(aux)) != len(aux):
             raise ValueError("aux_arm/angle/override/engage must be distinct")
+        if not (-1 <= int(self.power.aux_channel) <= 15):
+            raise ValueError("power.aux_channel must be -1 or in [0, 15]")
+        if int(self.power.aux_channel) >= 0 and int(self.power.aux_channel) in set(aux):
+            raise ValueError("power.aux_channel must differ from the flight AUX channels")
+        if self.power.hold_s <= 0.0:
+            raise ValueError("power.hold_s must be positive")
+        if not (1000 <= int(self.power.max_throttle) <= 2000):
+            raise ValueError("power.max_throttle must be in [1000, 2000]")
+        if not (1000 <= int(self.power.high_threshold) <= 2000):
+            raise ValueError("power.high_threshold must be in [1000, 2000]")
+        if self.power.max_rc_age_s <= 0.0 or self.power.max_status_age_s <= 0.0:
+            raise ValueError("power.max_*_age_s must be positive")
         for name in (
             "max_rc_age_s", "max_att_age_s", "max_alt_age_s", "max_status_age_s",
             "max_loop_dt_s", "max_det_age_s", "target_confirm_s", "target_lost_s",

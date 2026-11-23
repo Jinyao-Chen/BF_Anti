@@ -1,0 +1,16 @@
+/* BF_Anti: allow the onboard service account to halt the Pi from the RC
+   shutdown channel without an interactive polkit prompt.
+
+   The service runs as user pi5 with NoNewPrivileges=yes, so it cannot use
+   sudo.  systemctl talks to logind over D-Bus and this rule authorizes the
+   three power-off actions for that user.  Installed by
+   scripts/pi5_install.sh to /etc/polkit-1/rules.d/50-bf-anti-poweroff.rules.
+*/
+polkit.addRule(function(action, subject) {
+    if (subject.user == "pi5" &&
+        (action.id == "org.freedesktop.login1.power-off" ||
+         action.id == "org.freedesktop.login1.power-off-multiple-sessions" ||
+         action.id == "org.freedesktop.login1.power-off-ignore-inhibit")) {
+        return polkit.Result.YES;
+    }
+});

@@ -29,6 +29,7 @@ from onboard.logging_setup import (
     setup_console_logging,
     shutdown_faulthandler,
 )
+from onboard.power import ShutdownGuard, request_poweroff
 from onboard.safety import SafetyDecision, SafetyInputs, SafetySupervisor
 from onboard.telemetry_log import TelemetryLog, collect_run_meta, safe_float
 from onboard.types import ControlOutput, Detection, FcState
@@ -52,6 +53,7 @@ class OnboardApp:
         video=None,
         telemetry: Optional[TelemetryLog] = None,
         startup_retry_s: float = 2.0,
+        poweroff=None,
     ) -> None:
         self.cfg = cfg
         self.link = link
@@ -61,6 +63,12 @@ class OnboardApp:
         self.mux = mux
         self.video = video
         self.telemetry = telemetry
+        # RC-controlled graceful shutdown (CH7 by default).  The guard is pure;
+        # poweroff() is injected so tests never halt the host.
+        self.shutdown_guard = ShutdownGuard(cfg.power)
+        self._poweroff = poweroff or request_poweroff
+        self._poweroff_requested = False
+        self._poweroff_value = 0
         # Retry cadence for components that fail at boot (fb0/FC not ready).
         self.startup_retry_s = max(0.05, float(startup_retry_s))
         self._start_failures: dict[str, float] = {}
@@ -434,6 +442,26 @@ class OnboardApp:
         self._last_step = now
 
         state = self.state.snapshot(now)
+
+        # RC shutdown is independent of the flight-control gate.  It is allowed
+        # only when the FC is disarmed and the pilot has deliberately held the
+        # channel high; see onboard/power.py.
+        if self.shutdown_guard.update(now, state):
+            self._poweroff_requested = True
+            channels = tuple(state.rc or ())
+            idx = int(self.cfg.power.aux_channel)
+            self._poweroff_value = int(channels[idx]) if 0 <= idx < len(channels) else 0
+            LOG.warning(
+                "RC shutdown channel rc%d=%d held for %.1f s; requesting poweroff",
+                idx, self._poweroff_value, float(self.cfg.power.hold_s),
+            )
+            self._event(
+                "poweroff_requested",
+                channel=idx,
+                value=self._poweroff_value,
+                hold_s=float(self.cfg.power.hold_s),
+            )
+
         detection = self.detector.latest(self.cfg.safety.max_det_age_s, now)
         out = self.controller.step(detection, state, now, self._last_dt)
         decision = self.safety.evaluate(self._safety_inputs(state, detection, out, now))
@@ -565,6 +593,7 @@ class OnboardApp:
 
     def run(self) -> int:
         period = 1.0 / max(1.0, float(self.cfg.control.rate_hz))
+        stop_reason = "stop"
         try:
             self._start_with_retry()
             if self._stop.is_set():
@@ -598,6 +627,24 @@ class OnboardApp:
                     if now - self._last_tick_error_event_t >= 1.0:
                         self._last_tick_error_event_t = now
                         self._event("tick_error", error=repr(exc))
+
+                if self._poweroff_requested:
+                    self._poweroff_requested = False
+                    try:
+                        ok, detail = self._poweroff()
+                    except Exception as exc:
+                        ok, detail = False, repr(exc)
+                    if ok:
+                        self._event("poweroff_queued", detail=str(detail))
+                        LOG.warning("RC shutdown: system poweroff queued (%s)", detail)
+                        stop_reason = "rc_poweroff"
+                        self._stop.set()
+                        break
+                    LOG.error("RC shutdown: system poweroff failed: %s", detail)
+                    self._event("poweroff_failed", error=str(detail))
+                    # Keep the service alive; retry while the switch is held.
+                    self.shutdown_guard.retry_after(now)
+
                 next_t += period
                 sleep_s = next_t - time.monotonic()
                 if sleep_s > 0:
@@ -605,7 +652,7 @@ class OnboardApp:
                 else:
                     next_t = time.monotonic()
         finally:
-            self.stop()
+            self.stop(stop_reason)
         return 0
 
     def stop(self, reason: str = "stop") -> None:

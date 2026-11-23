@@ -20,6 +20,9 @@ def test_example_config_loads_and_profile_overlays():
     assert cfg.guidance.params["max_pitch_down_deg"] == 50.0
     assert cfg.safety.min_altitude_m == 2.0
     assert cfg.control.att_mode == "angle"
+    assert cfg.power.aux_channel == 6
+    assert cfg.power.hold_s == 2.0
+    assert cfg.power.require_disarmed is True
 
 
 def test_build_guidance_uses_measured_camera_geometry():
@@ -105,6 +108,24 @@ def test_bad_telemetry_hz_rejected(tmp_path):
     p = tmp_path / "bad.json"
     p.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="telemetry.hz"):
+        load_config(str(p))
+
+
+def test_power_channel_must_not_collide_with_flight_aux(tmp_path):
+    raw = json.load(open(EXAMPLE, encoding="utf-8"))
+    raw["power"]["aux_channel"] = raw["fc"]["aux_engage"]
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="power.aux_channel"):
+        load_config(str(p))
+
+
+def test_power_channel_range_rejected(tmp_path):
+    raw = json.load(open(EXAMPLE, encoding="utf-8"))
+    raw["power"]["aux_channel"] = 16
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="power.aux_channel"):
         load_config(str(p))
 
 

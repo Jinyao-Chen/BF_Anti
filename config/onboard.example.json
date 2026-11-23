@@ -28,6 +28,15 @@
     "override_from_mode": true,
     "stick_takeover": false
   },
+  "power": {
+    "aux_channel": 6,
+    "hold_s": 2.0,
+    "require_disarmed": true,
+    "max_throttle": 1100,
+    "max_rc_age_s": 0.3,
+    "max_status_age_s": 0.6,
+    "high_threshold": 1700
+  },
   "camera": {
     "device": "/dev/video0",
     "width": 1280,

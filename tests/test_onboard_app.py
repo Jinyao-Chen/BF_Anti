@@ -1,8 +1,9 @@
 """Onboard app wiring: fakes for FC/camera/detector/mux/video."""
 import time
+from dataclasses import replace
 
 from onboard.app import OnboardApp
-from onboard.config import load_config
+from onboard.config import PowerConfig, load_config
 from onboard.safety import SafetyDecision
 from onboard.types import Detection, FcState
 
@@ -103,8 +104,8 @@ def fresh_state(now):
     )
 
 
-def build_app(detection=None, state=None):
-    cfg = load_config("config/onboard.example.json")
+def build_app(detection=None, state=None, cfg=None):
+    cfg = cfg or load_config("config/onboard.example.json")
     now = time.monotonic()
     st = state or fresh_state(now)
     fake_state = FakeState(st)
@@ -140,6 +141,39 @@ def test_engaged_with_confirmed_target_publishes_track_cmd():
     assert cmd is not None
     assert 1000 <= cmd.throttle <= 2000
     assert 1000 <= cmd.roll <= 2000
+
+
+def test_rc_shutdown_channel_sets_poweroff_request_once():
+    now = time.monotonic()
+    cfg = replace(
+        load_config("config/onboard.example.json"),
+        power=PowerConfig(aux_channel=6, hold_s=0.05, max_rc_age_s=0.3),
+    )
+    st = fresh_state(now)
+    st.armed = False
+    rc = list(st.rc)
+    rc[2] = 1000
+    rc[6] = 1000
+    st.rc = tuple(rc)
+    app, _, _, _ = build_app(state=st, cfg=cfg)
+
+    # First sample is low: arm the edge detector.
+    app.step_once(now)
+    assert app._poweroff_requested is False
+
+    rc[6] = 2000
+    st.rc = tuple(rc)
+    st.rc_t = now + 0.01
+    st.status_t = now + 0.01
+    app.step_once(now + 0.01)
+    assert app._poweroff_requested is False
+    app.step_once(now + 0.10)
+    assert app._poweroff_requested is True
+    # run() consumes the flag before issuing the command; the guard itself is
+    # one-shot until the runtime retries or the switch cycles.
+    app._poweroff_requested = False
+    app.step_once(now + 0.20)
+    assert app._poweroff_requested is False
 
 
 def test_stale_rc_immediately_closes_gate():

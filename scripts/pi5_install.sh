@@ -284,6 +284,20 @@ if [ "$DO_SERVICE" -eq 1 ]; then
       info "or run: sudo systemctl enable --now bf-anti-onboard"
     fi
   fi
+
+  step "6b. polkit poweroff rule"
+  POLKIT_RULE_SRC="$SOURCE/systemd/50-bf-anti-poweroff.rules"
+  POLKIT_RULE_DST=/etc/polkit-1/rules.d/50-bf-anti-poweroff.rules
+  if [ ! -f "$POLKIT_RULE_SRC" ]; then
+    warn "missing $POLKIT_RULE_SRC; RC soft-shutdown will fail authentication"
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    info "would install $POLKIT_RULE_DST"
+  else
+    install -d -m 0755 /etc/polkit-1/rules.d
+    install -m 0644 -o root -g root "$POLKIT_RULE_SRC" "$POLKIT_RULE_DST"
+    ok "installed $POLKIT_RULE_DST (polkit reloads rules automatically)"
+  fi
+
   if [ "$DO_PERSISTENT_JOURNAL" -eq 1 ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
       info "would enable persistent journald"

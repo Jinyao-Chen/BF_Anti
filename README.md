@@ -1,11 +1,11 @@
 # BF_Anti — 反无人机视觉制导 + Betaflight MSP 飞控
 
-[![Pi 5](https://img.shields.io/badge/Raspberry%20Pi-5%204GB-C51A4A)](https://www.raspberrypi.com/products/raspberry-pi-5/)
+[![Pi 5](https://img.shields.io/badge/Raspberry%20Pi-5%202GB-C51A4A)](https://www.raspberrypi.com/products/raspberry-pi-5/)
 [![Hailo](https://img.shields.io/badge/AI%20HAT%2B-Hailo--8L%2013TOPS-00A6FF)](https://hailo.ai/)
 [![Betaflight](https://img.shields.io/badge/Betaflight-release260904%20%2B%20SITL-00A6FF)](https://github.com/betaflight/betaflight)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-FFB300)](https://github.com/ultralytics/ultralytics)
 
-> **当前主线：Raspberry Pi 5 4GB + AI HAT+ Hailo-8L (13 TOPS)**。
+> **当前主线：Raspberry Pi 5 2GB + AI HAT+ Hailo-8L (13 TOPS)**。
 > USB 相机 → Hailo YOLOv8 → 跟踪/纯 P+PN 制导 → MSP 覆盖 RPYT → Betaflight；
 > J7 复合视频 (720x576i PAL) 直接进 VTX/眼镜，不走 HDMI 转换器。
 >
@@ -29,7 +29,7 @@
 
 | 组件 | 当前选择 | 状态 |
 |---|---|---|
-| 机载电脑 | Raspberry Pi 5 Model B 4GB | 已实测 |
+| 机载电脑 | Raspberry Pi 5 Model B 2GB | 已实测 |
 | NPU | AI HAT+ Hailo-8L 13 TOPS (HAILO8L) | 已实测，HailoRT 4.23.0 |
 | 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已实测约 25 fps；FOV/tilt 需按实机标定 |
 | 飞控 | Betaflight 4.5.3, S405 / OMNIBUSF4SD | USB /dev/ttyACM0；UART3 CRSF；msp_override_channels_mask=15；RATE/ACTUAL 600/600/300 |
@@ -67,11 +67,13 @@ USB UVC 1280x720 MJPG
 - 无 GPS/光流：制导用 speed_source=closing，水平位置/速度不参与；高度用 MSP_ALTITUDE。
 - 相机 tilt/yaw、FC 板卡、AUX 映射、电池阈值必须实测后写入 config/onboard.json；不要猜。
 - 伴机绝不自动解锁；CH8 低位是硬件 CRSF 直通，也是伴机异常时的第一动作。
+- CH7 默认是 RC 软关机（不是飞控模式）：仅当已 disarmed、油门低、低→高并保持 2 s
+  才执行 systemctl poweroff；上电时 CH7 已高不会触发。
 
 ### 快速命令
 
 ~~~bash
-# 本机单测（当前 401 项）
+# 本机单测（当前 412 项）
 python3 -m pytest -q
 
 # 协议自检（离线 / SITL TCP / 真机串口）
@@ -169,9 +171,74 @@ log_summary.py 会给出四路信号是否齐全：
 > SD 卡或 dataflash；它记录 gyro/setpoint/RC/motor 等 FC 高频数据，不记录伴机的
 > YOLO/制导。两者可以同时开，互为补充。
 >
-> 状态：伴机日志代码与 401 项测试已合入；**Pi5 真机开机落盘尚未复测**。首次上机
+> 状态：伴机日志代码与 412 项测试已合入；**Pi5 真机开机落盘尚未复测**。首次上机
 > 先跑 scripts/pi5_log_check.sh，并保留 run_*/startup.json 作为代码版本/配置/boot_id
 > 证据。
+
+### RC 软关机（Pi 5 断电保护）
+
+Pi 5 没有电池后备，飞行结束后直接拔电池可能让 SD 卡在写入中掉电。现在增加
+一个遥控器 2 位开关，让伴机先执行正常关机，再拔电池。
+
+**通道**：默认 CH7（AUX3，0-based index 6）。不需要在 Betaflight 里建 mode；
+伴机通过 MSP_RC 读取这个原始通道。FC 的 msp_override_channels_mask=15
+只覆盖 RPYT，AUX 通道仍是接收机实际值。
+
+**遥控器设置**（EdgeTX/OpenTX 类）：
+
+- MODEL → MIXES：CH7 = 一个 2 位开关（SF/SE 等），Weight 100，Offset 0；
+- 端点/舵量约 1000 / 2000 µs；不要反相；
+- 在 Betaflight Receiver 页确认 CH7 在 1000 ↔ 2000 之间切换。
+
+**触发条件**（全部满足才关机）：
+
+1. CH7 从低位（<1700）拨到高位（≥1700）；
+2. 飞控 armed=0；
+3. 油门 < 1100；
+4. RC 与 STATUS 数据新鲜；
+5. 高位保持 2.0 s。
+
+上电时如果 CH7 已经在高位，不会立刻关机；必须先回低位再拨高，避免开机循环。
+
+**关机过程**：伴机写 poweroff_requested / poweroff_queued 事件，调用
+systemctl poweroff --no-block，服务收到 SIGTERM 后 flush blackbox，Pi 正常
+halt。等 Pi 绿灯/HDMI 完全熄灭后再拔电池。FC 仍由电池供电，关机期间不要解锁。
+
+**配置**：
+
+~~~json
+"power": {
+  "aux_channel": 6,
+  "hold_s": 2.0,
+  "require_disarmed": true,
+  "max_throttle": 1100,
+  "max_rc_age_s": 0.3,
+  "max_status_age_s": 0.6,
+  "high_threshold": 1700
+}
+~~~
+
+aux_channel 是 0-based AETR：6=CH7，7=CH8；-1 关闭。不要和
+ARM/ANGLE/OVERRIDE/MODE 通道复用，配置校验会拒绝。
+
+**权限**：服务是 pi5 且 NoNewPrivileges=yes，不能用 sudo。安装脚本会装
+/etc/polkit-1/rules.d/50-bf-anti-poweroff.rules，允许 pi5 调 logind 的
+power-off；systemctl 通过 D-Bus 完成，无需交互密码。
+
+**验证**：
+
+~~~bash
+busctl call org.freedesktop.login1 /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager CanPowerOff      # s "yes"
+journalctl -u bf-anti-onboard -b | grep -E 'RC shutdown|poweroff'
+grep -E 'rc6|poweroff' <log_dir>/latest/telemetry.csv <log_dir>/latest/events.jsonl
+~~~
+
+如果 CH7 在 telemetry 里不动，先查接收机通道映射/端点；如果 poweroff_failed，
+查 polkit 规则和 systemctl poweroff 权限。
+
+> 这是“先软关机再拔电池”，不是自动切电。若要在忘记拔电池时自动断主电，
+> 需要额外的 5V 电源锁存/MOSFET 或 UPS 模块，不能只靠 Pi GPIO。
 
 ### 硬件与证据边界
 
@@ -273,7 +340,7 @@ BF_Anti/
 ├── modeling/                 理论模型与整定（四旋翼、高度环、PID）
 ├── sim/                      Gazebo SITL 仿真工作区 -> 见 sim/README.md
 ├── docs/                     文档（本地保留、未纳入版本控制；见 .gitignore）
-├── tests/                    单元测试（401 项）
+├── tests/                    单元测试（412 项）
 └── scripts/
     ├── pi5_bringup.sh / pi5_install.sh / pi5_run_onboard.sh
     ├── pi5_log_check.sh / pi5_enable_persistent_journal.sh
@@ -449,7 +516,7 @@ Gazebo/Betaflight SITL 下的**纯比例（P-only）视觉制导**打击闭环�
 稳定性根因与修复 · 检测后端实测对比。
 
 ```bash
-# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 401 项）
+# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 412 项）
 python3 -m pytest -q
 
 # 运动学包线：静态/径向目标命中，横向匀速目标记录滞后
@@ -517,4 +584,4 @@ GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index
 | `sim/results/` | 验证数据（`.csv`/`.png`）；复盘报告 `*.md` 为本地文档 |
 
 代码规范：Python 以 `python3 -m flake8 --select=E9,F63,F7,F82,F401,F841,E722,W605` 零告警为准，
-`python3 -m pytest -q` 全绿（当前 401 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
+`python3 -m pytest -q` 全绿（当前 412 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。

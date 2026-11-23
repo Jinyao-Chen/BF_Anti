@@ -47,12 +47,15 @@ rsync -a --delete-delay \
   --exclude 'sim/results' --exclude 'sim/models' --exclude '*.mp4' --exclude '*.log' \
   --exclude '*.whl' --exclude '*.SLDPRT' --exclude 'Anti-UAV' --exclude 'legacy' \
   --exclude '*.onnx' --exclude 'docs' \
-  --exclude 'config/onboard.json' --exclude 'config/onboard.pi5.json' \
+  --exclude 'config/onboard.json' --exclude 'config/onboard.json.bak.*' \
+  --exclude 'config/onboard.pi5.json' \
   -e "ssh $SSH_OPTS" "$SOURCE/" "$PI_HOST:$PREFIX/"
 run_ssh "chmod +x '$PREFIX'/scripts/*.sh '$PREFIX'/scripts/*.py 2>/dev/null || true"
 
 say "3. config"
 if [ -f "$SOURCE/config/onboard.pi5.json" ]; then
+  # Keep the previous aircraft config for post-flight comparison.
+  run_ssh "if [ -f '$PREFIX/config/onboard.json' ]; then cp '$PREFIX/config/onboard.json' '$PREFIX/config/onboard.json.bak.\$(date +%Y%m%d-%H%M%S)'; fi"
   rsync -a -e "ssh $SSH_OPTS" "$SOURCE/config/onboard.pi5.json" "$PI_HOST:$PREFIX/config/onboard.json"
   echo "installed config/onboard.pi5.json -> config/onboard.json"
 elif ! run_ssh "test -f '$PREFIX/config/onboard.json'"; then
@@ -61,7 +64,14 @@ elif ! run_ssh "test -f '$PREFIX/config/onboard.json'"; then
 fi
 
 say "4. install service (no apt, no rsync repeat)"
-sudo_remote "bash '$PREFIX/scripts/pi5_install.sh' --no-apt --no-rsync --enable-service"
+# A deployed board already has its venv.  Skipping pip keeps an offline
+# flight-line update from hanging on a package index it cannot reach.
+if run_ssh "test -x '$PREFIX/.venv/bin/python'"; then
+  VENV_FLAG=--no-venv
+else
+  VENV_FLAG=
+fi
+sudo_remote "bash '$PREFIX/scripts/pi5_install.sh' --no-apt --no-rsync --enable-service $VENV_FLAG"
 
 say "5. service state"
 if [ "$START" -eq 1 ]; then
