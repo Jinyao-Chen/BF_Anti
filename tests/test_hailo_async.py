@@ -65,3 +65,24 @@ def test_successful_frame_replaces_pair_and_stats_time():
     assert det.latest_pair(1.0, now=30.2) == (f2, d2)
     assert det.stats().last_det_t == 30.1
     det.stop()
+
+
+def test_next_frame_deduplicates_same_camera_stamp():
+    class Source:
+        def __init__(self):
+            self.items = [(np.zeros((4, 4, 3), np.uint8), 10.0),
+                          (np.ones((4, 4, 3), np.uint8), 10.0),
+                          (np.ones((4, 4, 3), np.uint8), 10.04)]
+
+        def latest(self, max_age_s, now=None):
+            return self.items.pop(0) if self.items else (None, 0.0)
+
+    det = make_detector()
+    det.attach_source(Source())
+    frame, stamp = det._next_frame()
+    assert stamp == 10.0
+    # Same capture stamp must not be inferred twice.
+    assert det._next_frame() == (None, 0.0)
+    frame, stamp = det._next_frame()
+    assert stamp == 10.04
+    det.stop()

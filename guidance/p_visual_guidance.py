@@ -33,6 +33,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Sequence
@@ -121,6 +122,7 @@ class PVisualGuidance:
         self,
         camera_tilt_deg: float = 40.0,
         camera_yaw_offset_deg: float = 0.0,
+        camera_dist_coeffs: Optional[Sequence[float]] = None,
         image_size: tuple[int, int] = (640, 480),
         hfov_deg: float = 68.75,
         kp_yaw: float = 55.0,
@@ -212,7 +214,15 @@ class PVisualGuidance:
         self.camera_tilt_deg = float(camera_tilt_deg)
         self.camera_yaw_offset_deg = float(camera_yaw_offset_deg)
         self.intrinsics = CameraIntrinsics.from_fov(*image_size, hfov_deg=hfov_deg)
-        self.extrinsics = CameraExtrinsics(tilt_deg=camera_tilt_deg)
+        if camera_dist_coeffs:
+            self.intrinsics = dataclasses.replace(
+                self.intrinsics,
+                dist_coeffs=tuple(float(v) for v in camera_dist_coeffs),
+            )
+        self.extrinsics = CameraExtrinsics(
+            tilt_deg=camera_tilt_deg,
+            yaw_offset_deg=camera_yaw_offset_deg,
+        )
 
         self.kp_yaw = float(kp_yaw)
         self.kp_roll = float(kp_roll)
@@ -446,7 +456,7 @@ class PVisualGuidance:
         # 量测几何：像素 → 地球系视线 → (方位, 仰角)
         los_e = pixel_to_earth_los(
             (u_px, v_px), self.intrinsics, self.extrinsics,
-            yaw_deg=yaw_own + self.camera_yaw_offset_deg,
+            yaw_deg=yaw_own,
             pitch_deg=pitch_own, roll_deg=roll_own,
         )
         az_los, el_los = earth_los_to_az_el(los_e)
@@ -515,12 +525,16 @@ class PVisualGuidance:
         if len(self._range_hist) > self.closing_fit_n:
             del self._range_hist[0: len(self._range_hist) - self.closing_fit_n]
         if len(self._range_hist) >= 2:
-            t_h0, r_h0 = self._range_hist[0]
-            t_h1, r_h1 = self._range_hist[-1]
-            if t_h1 - t_h0 > 1e-3:
-                self._closing_mps = float(np.clip(
-                    -(r_h1 - r_h0) / (t_h1 - t_h0),
-                    -self.closing_max_mps, self.closing_max_mps))
+            ts = np.array([pt[0] for pt in self._range_hist], dtype=float)
+            rs = np.array([pt[1] for pt in self._range_hist], dtype=float)
+            dt_span = float(ts[-1] - ts[0])
+            if dt_span > 1e-3:
+                t_c = ts - float(ts.mean())
+                denom = float(np.dot(t_c, t_c))
+                if denom > 1e-9:
+                    slope = float(np.dot(t_c, rs - float(rs.mean())) / denom)
+                    self._closing_mps = float(np.clip(
+                        -slope, -self.closing_max_mps, self.closing_max_mps))
         self._r_prev = range_for_tau
         tau_s = float(np.clip(range_for_tau / max(0.5, self._closing_mps),
                                self.tau_min_s, self.tau_max_s))
@@ -543,11 +557,17 @@ class PVisualGuidance:
                 del self._az_hist[0: len(self._az_hist) - self.closing_fit_n]
         lam_raw_dps = 0.0
         if len(self._az_hist) >= 2:
-            t_a0, az_a0 = self._az_hist[0]
-            t_a1, az_a1 = self._az_hist[-1]
-            if t_a1 - t_a0 > 1e-3:
-                d_az = (az_a1 - az_a0 + 180.0) % 360.0 - 180.0
-                lam_raw_dps = d_az / (t_a1 - t_a0)
+            ts_a = np.array([pt[0] for pt in self._az_hist], dtype=float)
+            if float(ts_a[-1] - ts_a[0]) > 1e-3:
+                az0 = float(self._az_hist[0][1])
+                az_rel = np.array([
+                    ((pt[1] - az0 + 180.0) % 360.0) - 180.0
+                    for pt in self._az_hist
+                ], dtype=float)
+                t_c = ts_a - float(ts_a.mean())
+                denom = float(np.dot(t_c, t_c))
+                if denom > 1e-9:
+                    lam_raw_dps = float(np.dot(t_c, az_rel - float(az_rel.mean())) / denom)
         if self.pn_rate_lpf_s > 0.0:
             a_rate = float(dt) / (self.pn_rate_lpf_s + float(dt))
             self._lam_dps = (lam_raw_dps if self._lam_dps is None
@@ -750,12 +770,7 @@ class PVisualGuidance:
         roll_cmd = _clamp(roll_cmd, -self.max_roll_deg, self.max_roll_deg)
         yaw_rate = _clamp(yaw_rate, -self.max_yaw_rate_dps, self.max_yaw_rate_dps)
 
-        if self.lift_ff:
-            # 常系数对象补偿：倾角 σ 下要维持同样垂向推力，需要 T/cos(σ)。
-            # 而 T ∝ cmd²，所以命令空间的补偿系数是 1/sqrt(cos σ)（不是 1/cos）。
-            sigma = abs(min(0.0, pitch_cmd))
-            throttle = 1000.0 + (throttle - 1000.0) / max(
-                float(np.sqrt(np.cos(np.deg2rad(sigma)))), 0.40)
+        throttle = self._lift_ff_throttle(throttle, pitch_own, roll_own)
         if low_guard:
             throttle = max(throttle, self.hover_pwm)
 
@@ -878,6 +893,23 @@ class PVisualGuidance:
             vz_cmd = max(float(vz_limit), 0.0)
         return float(self.hover_pwm + self.kp_vz * (vz_cmd - float(v_up)))
 
+    def _lift_ff_throttle(self, throttle: float, pitch_own: float,
+                          roll_own: float) -> float:
+        """Compensate the vertical component lost at measured total tilt.
+
+        Thrust is ~quadratic in (pwm-1000), and only T*cos(tilt) supports
+        weight.  Using measured pitch AND roll keeps the altitude-loop gain
+        unchanged while compensating the actual lift loss (the old formula
+        used commanded pitch only and ignored roll).
+        """
+        if not self.lift_ff:
+            return float(throttle)
+        cos_tilt = max(
+            float(np.cos(np.deg2rad(pitch_own)) * np.cos(np.deg2rad(roll_own))),
+            0.45,
+        )
+        return 1000.0 + (float(throttle) - 1000.0) / float(np.sqrt(cos_tilt))
+
     def _altitude_pwm(self, z_own: float, v_up: float = 0.0,
                       z_ref: Optional[float] = None) -> float:
         """高度环（两个 P 串联）+ 硬限幅。"""
@@ -948,6 +980,18 @@ class PVisualGuidance:
         self._hit_count = 0
         self._ei_pitch_deg = 0.0
         self._ei_roll_deg = 0.0
+        self._z_int = 0.0
+        self._z_ref_filt = None
+        self._range_hist.clear()
+        self._closing_mps = 1.0
+        self._r_prev = None
+        self._az_hist.clear()
+        self._lam_dps = None
+        self._lam_inertial_dps = None
+        self._eu_filt = None
+        self._lead_v_perp = None
+        self._acq_t = None
+        self._was_tracking = False
 
     def reset_tracking(self) -> None:
         """Explicit alias used by the onboard controller on re-engage."""

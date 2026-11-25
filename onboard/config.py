@@ -90,11 +90,20 @@ class CameraConfig:
     vfov_deg: Optional[float] = None
     tilt_deg: float = 44.0
     yaw_offset_deg: float = 0.0
+    # Brown-Conrady k1,k2,p1,p2,k3 from a chessboard calibration.  None keeps
+    # the legacy pinhole model.
+    dist_coeffs: Optional[tuple[float, ...]] = None
+    # Extra capture->timestamp delay not represented by time.monotonic()
+    # (MJPEG decode / rotation / driver queue).  Calibrate, do not guess.
+    latency_s: float = 0.0
     warmup_s: float = 1.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "CameraConfig":
-        return cls(**_pick(cls, data))
+        raw = _pick(cls, data)
+        if raw.get("dist_coeffs") is not None:
+            raw["dist_coeffs"] = tuple(float(v) for v in raw["dist_coeffs"])
+        return cls(**raw)
 
 
 @dataclass(frozen=True)
@@ -158,6 +167,9 @@ class SafetyConfig:
     target_lost_s: float = 0.40
     lost_reset_s: float = 1.5
     fault_latch: bool = True
+    # A single sagging battery sample must not latch FAULT.  0 = old
+    # single-sample behaviour; e.g. 1.0 requires 1 s below min_battery_v.
+    battery_debounce_s: float = 0.0
 
     @classmethod
     def from_dict(cls, data: dict) -> "SafetyConfig":
@@ -290,6 +302,11 @@ class AppConfig:
             raise ValueError("camera width/height must be positive")
         if not (0.0 < self.camera.fps <= 240.0):
             raise ValueError("camera.fps must be in (0, 240]")
+        if not (0.0 <= self.camera.latency_s <= 0.5):
+            raise ValueError("camera.latency_s must be in [0, 0.5]")
+        if self.camera.dist_coeffs is not None:
+            if not (4 <= len(self.camera.dist_coeffs) <= 8):
+                raise ValueError("camera.dist_coeffs must have 4..8 values")
         if int(self.camera.rotate_deg) % 360 not in (0, 90, 180, 270):
             raise ValueError("camera.rotate_deg must be 0/90/180/270")
         if self.detector.backend not in ("hailo", "replay", "null"):
@@ -343,6 +360,8 @@ class AppConfig:
             raise ValueError("telemetry.max_file_mb must be positive")
         if self.telemetry.max_runs < 1:
             raise ValueError("telemetry.max_runs must be >= 1")
+        if self.safety.battery_debounce_s < 0.0:
+            raise ValueError("safety.battery_debounce_s must be >= 0")
         if self.telemetry.flush_interval_s <= 0.0:
             raise ValueError("telemetry.flush_interval_s must be positive")
         if self.telemetry.fsync_interval_s < 0.0:
@@ -372,6 +391,7 @@ class AppConfig:
         params["image_size"] = (width, height)
         params["hfov_deg"] = hfov
         params.setdefault("camera_yaw_offset_deg", float(self.camera.yaw_offset_deg))
+        params.setdefault("camera_dist_coeffs", self.camera.dist_coeffs)
         return PVisualGuidance(**params)
 
 

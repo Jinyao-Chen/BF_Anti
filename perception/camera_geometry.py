@@ -4,20 +4,20 @@
 ----------
 Earth (ENU)
     x = East, y = North, z = Up。
-Body
-    x = 机头前方, y = 右方, z = 上方。
-Camera
+Body (FLU 右手系)
+    x = 机头前方, y = 左方, z = 上方。
+Camera (右手系)
     x = 图像右方, y = 图像下方, z = 光轴前方。
     这对应 Gazebo / 常规针孔相机坐标系。
 
 相机安装
 --------
-相机光轴相对机体 +X 向上抬高 ``tilt_deg``，绕机体 +Y 轴旋转。
+相机光轴相对机体 +X 向上抬高 ``tilt_deg``，绕机体 -Y 轴上仰。
 因此相机光轴在机体系为::
 
     z_c_b = (cos(tilt), 0, sin(tilt))
 
-相机 x 轴与机体 y 轴重合，y 轴为 z_c_b × x_c_b。
+相机 x 轴与机体 -y 轴重合（x_c_b = (0, -1, 0)），y 轴为 z_c_b × x_c_b。
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ class CameraIntrinsics:
     fy: float
     cx: float
     cy: float
+    dist_coeffs: tuple[float, ...] | None = None
 
     @classmethod
     def from_fov(
@@ -154,12 +155,22 @@ def rotation_enu_body_to_rpy(r_eb: np.ndarray) -> tuple[float, float, float]:
 
 
 def pixel_to_camera_ray(pixel_uv: tuple[float, float], intr: CameraIntrinsics) -> np.ndarray:
-    """像素坐标 -> 相机系单位视线。"""
+    """像素坐标 -> 相机系单位视线（支持可选 Brown-Conrady 去畸变）。"""
     u, v = pixel_uv
-    x = (u - intr.cx) / intr.fx
-    y = (v - intr.cy) / intr.fy
-    z = 1.0
-    ray = np.array([x, y, z], dtype=float)
+    xd = (u - intr.cx) / intr.fx
+    yd = (v - intr.cy) / intr.fy
+    x, y = xd, yd
+    if intr.dist_coeffs:
+        dc = list(intr.dist_coeffs) + [0.0] * 5
+        k1, k2, p1, p2, k3 = dc[:5]
+        for _ in range(5):
+            r2 = x * x + y * y
+            radial = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
+            dx = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+            dy = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
+            x = (xd - dx) / max(radial, 1e-6)
+            y = (yd - dy) / max(radial, 1e-6)
+    ray = np.array([x, y, 1.0], dtype=float)
     return ray / np.linalg.norm(ray)
 
 

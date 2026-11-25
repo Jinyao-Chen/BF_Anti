@@ -69,7 +69,7 @@ def test_force_manual_never_engages_even_with_request():
 
 def test_auto_engages_only_after_manual_arm_edge():
     source = Source()
-    mux = make_mux(source)
+    mux = make_mux(source, base_throttle=1200)
     entered = []
     mux.on_engage = lambda thr: entered.append(thr)
     mux.request_auto(True)

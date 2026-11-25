@@ -546,15 +546,21 @@ def parse_hailo_nms(
                 raise ValueError(
                     "per-class NMS array must be (M, 5), got %r" % (arr.shape,)
                 )
+            finite_mask = np.all(np.isfinite(arr[:, :5]), axis=1)
+            arr = arr[finite_mask]
+            if arr.shape[0] == 0:
+                continue
             classes = np.full(arr.shape[0], int(class_id), dtype=np.int64)
             mask = arr[:, 4] >= conf_th if conf_th > 0.0 else arr[:, 4] > 0.0
             arr = arr[mask]
             if arr.shape[0] == 0:
                 continue
-            x1 = arr[:, 1] * params.dst_w
-            y1 = arr[:, 0] * params.dst_h
-            x2 = arr[:, 3] * params.dst_w
-            y2 = arr[:, 2] * params.dst_h
+            sx = params.dst_w if normalized else 1.0
+            sy = params.dst_h if normalized else 1.0
+            x1 = arr[:, 1] * sx
+            y1 = arr[:, 0] * sy
+            x2 = arr[:, 3] * sx
+            y2 = arr[:, 2] * sy
             boxes = np.stack([x1, y1, x2, y2], axis=1)
             kept = nms(boxes, arr[:, 4], iou_th)
             candidates.extend(
@@ -572,7 +578,21 @@ def parse_hailo_nms(
             "get_buffer(tf_format=True) instead" % (arr.shape,)
         )
     if arr.ndim == 2:
-        if arr.shape[1] == 5 and arr.shape[0] != 5:
+        if arr.shape == (5, 5):
+            row_valid = (
+                np.all((arr[:, 4] >= 0.0) & (arr[:, 4] <= 1.0))
+                and np.all(arr[:, 2] >= arr[:, 0])
+                and np.all(arr[:, 3] >= arr[:, 1])
+            )
+            col_valid = (
+                np.all((arr[4, :] >= 0.0) & (arr[4, :] <= 1.0))
+                and np.all(arr[2, :] >= arr[0, :])
+                and np.all(arr[3, :] >= arr[1, :])
+            )
+            if row_valid and not col_valid:
+                return _nms_rows(arr, params, conf_th, iou_th, max_det, t, normalized)
+            return _nms_rows(arr.T, params, conf_th, iou_th, max_det, t, normalized)
+        if arr.shape[1] == 5:
             return _nms_rows(arr, params, conf_th, iou_th, max_det, t, normalized)
         if arr.shape[0] == 5:
             return _nms_rows(

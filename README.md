@@ -73,7 +73,7 @@ USB UVC 1280x720 MJPG
 ### 快速命令
 
 ~~~bash
-# 本机单测（当前 412 项）
+# 本机单测（当前 430 项）
 python3 -m pytest -q
 
 # 协议自检（离线 / SITL TCP / 真机串口）
@@ -171,7 +171,7 @@ log_summary.py 会给出四路信号是否齐全：
 > SD 卡或 dataflash；它记录 gyro/setpoint/RC/motor 等 FC 高频数据，不记录伴机的
 > YOLO/制导。两者可以同时开，互为补充。
 >
-> 状态：伴机日志代码与 412 项测试已合入；**Pi5 真机开机落盘已于 2026-11-23 复测**
+> 状态：伴机日志代码与 430 项测试已合入；**Pi5 真机开机落盘已于 2026-11-23 复测**
 > （重启后服务自启，run_*/telemetry.csv 持续写入）。首次上机仍先跑
 > scripts/pi5_log_check.sh，并保留 run_*/startup.json 作为代码版本/配置/boot_id 证据。
 > 当前 Pi 的相机/FC USB 尚未枚举，需插好后再确认 /dev/video0 与 /dev/ttyACM0。
@@ -341,7 +341,7 @@ BF_Anti/
 ├── modeling/                 理论模型与整定（四旋翼、高度环、PID）
 ├── sim/                      Gazebo SITL 仿真工作区 -> 见 sim/README.md
 ├── docs/                     文档（本地保留、未纳入版本控制；见 .gitignore）
-├── tests/                    单元测试（412 项）
+├── tests/                    单元测试（430 项）
 └── scripts/
     ├── pi5_bringup.sh / pi5_install.sh / pi5_run_onboard.sh
     ├── pi5_log_check.sh / pi5_enable_persistent_journal.sh
@@ -517,7 +517,7 @@ Gazebo/Betaflight SITL 下的**纯比例（P-only）视觉制导**打击闭环�
 稳定性根因与修复 · 检测后端实测对比。
 
 ```bash
-# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 412 项）
+# 单元测试（纯 P 契约 + 运动学回归 + Pi5 机载，共 430 项）
 python3 -m pytest -q
 
 # 运动学包线：静态/径向目标命中，横向匀速目标记录滞后
@@ -585,4 +585,4 @@ GPU 绑定红线：检测服务**只能绑 `/dev/nvidia0`**（= nvidia-smi index
 | `sim/results/` | 验证数据（`.csv`/`.png`）；复盘报告 `*.md` 为本地文档 |
 
 代码规范：Python 以 `python3 -m flake8 --select=E9,F63,F7,F82,F401,F841,E722,W605` 零告警为准，
-`python3 -m pytest -q` 全绿（当前 412 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。
+`python3 -m pytest -q` 全绿（当前 430 项）；每个模块首行写模块 docstring，脚本首段写清用途与复现命令。

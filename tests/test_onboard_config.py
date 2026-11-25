@@ -12,14 +12,14 @@ EXAMPLE = os.path.join(ROOT, "config", "onboard.example.json")
 
 def test_example_config_loads_and_profile_overlays():
     cfg = load_config(EXAMPLE)
-    assert cfg.profile == "real_pn8_angle"
+    assert cfg.profile == "real_pn8_rate"
     assert cfg.fc.aux_engage == 7
-    # Values that exist only in config/profiles/real_pn8_angle.json
+    # Values that exist only in config/profiles/*.json
     assert cfg.guidance.params["kp_roll"] == 45.0
     assert cfg.guidance.params["pn_gain"] == 8.0
     assert cfg.guidance.params["max_pitch_down_deg"] == 50.0
     assert cfg.safety.min_altitude_m == 2.0
-    assert cfg.control.att_mode == "angle"
+    assert cfg.control.att_mode == "rate"
     assert cfg.power.aux_channel == 6
     assert cfg.power.hold_s == 2.0
     assert cfg.power.require_disarmed is True
@@ -136,3 +136,13 @@ def test_bad_telemetry_retention_rejected(tmp_path):
     p.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="max_runs"):
         load_config(str(p))
+
+
+def test_build_guidance_wires_optional_distortion(tmp_path):
+    raw = json.load(open(EXAMPLE, encoding="utf-8"))
+    raw["camera"]["dist_coeffs"] = [-0.25, 0.05, 0.001, -0.002, 0.0]
+    p = tmp_path / "dist.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    cfg = load_config(str(p))
+    g = cfg.build_guidance()
+    assert g.intrinsics.dist_coeffs == pytest.approx((-0.25, 0.05, 0.001, -0.002, 0.0))

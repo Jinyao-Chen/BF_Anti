@@ -78,6 +78,8 @@ class BboxTracker:
         vx, vy, vw, vh = self._v
         dt = self._dt
         self._c = (cx + vx * dt, cy + vy * dt, max(2.0, w + vw * dt), max(2.0, h + vh * dt))
+        # Mild coasting velocity decay prevents runaway extrapolation on long misses.
+        self._v = (vx * 0.92, vy * 0.92, vw * 0.92, vh * 0.92)
 
     def _predicted_center(self) -> Tuple[float, float]:
         assert self._c is not None
@@ -123,8 +125,11 @@ class BboxTracker:
 
             if self._c is not None and self._streak >= self.confirm_frames:
                 px, py = self._predicted_center()
-                gate = max(self.gate_px,
-                           self.gate_gain * math.hypot(self._v[0], self._v[1]) * self._dt)
+                miss_scale = max(1, self._miss + 1)
+                gate = max(
+                    self.gate_px * (1.0 + 0.15 * self._miss),
+                    self.gate_gain * math.hypot(self._v[0], self._v[1]) * self._dt * miss_scale,
+                )
                 if math.hypot(cx - px, cy - py) > gate:
                     # 跳框：不采信，用外推继续
                     self._miss += 1
@@ -155,7 +160,12 @@ class BboxTracker:
 
     def _miss_step(self, reason: str) -> TrackOut:
         self._miss += 1
-        if self._c is not None and self._miss <= self.max_coast_frames and self._streak > 0:
+        if (
+            reason != "lost"
+            and self._c is not None
+            and self._miss <= self.max_coast_frames
+            and self._streak > 0
+        ):
             self._advance()
             return TrackOut(self._bbox(), self._streak >= self.confirm_frames,
                             True, self._streak, "coast")
