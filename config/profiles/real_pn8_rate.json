@@ -16,7 +16,7 @@
       "max_pitch_up_deg": 25,
       "max_pitch_down_deg": 50,
       "max_yaw_rate_dps": 300,
-      "thr_min_pwm": 1400,
+      "thr_min_pwm": 1180,
       "thr_max_pwm": 1950,
       "target_width_m": 0.55,
       "range_max_m": 150,
@@ -30,7 +30,7 @@
       "range_lpf_min_range_m": 12,
       "pn_gain": 8,
       "pn_roll_cap_deg": 15,
-      "pn_rate_lpf_s": 0.35,
+      "pn_rate_lpf_s": 0.15,
       "pn_vc_min_mps": 2,
       "pn_vc_max_mps": 12,
       "pn_min_speed_mps": 2.5,
@@ -44,7 +44,8 @@
       "climb_along_los": false,
       "ki_z": 0,
       "ki_pitch": 0,
-      "ki_roll": 0
+      "ki_roll": 0,
+      "lift_ff": true
     }
   },
   "safety": {

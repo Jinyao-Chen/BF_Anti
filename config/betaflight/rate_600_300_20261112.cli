@@ -23,7 +23,15 @@ set roll_expo = 0
 set pitch_expo = 0
 set yaw_expo = 0
 
-# 3) MSP override: RPYT from companion, AUX stays on CRSF
+# 3) Explicit channel map, zero deadband & low-latency RC smoothing
+map AETR1234
+set deadband = 0
+set yaw_deadband = 0
+set angle_limit = 60
+set rc_smoothing = ON
+set rc_smoothing_auto_factor = 15
+
+# 4) MSP override: RPYT from companion, AUX stays on CRSF
 set msp_override_channels_mask = 15
 set msp_override_failsafe = OFF
 

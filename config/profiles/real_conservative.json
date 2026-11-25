@@ -7,13 +7,13 @@
       "kp_velalign": 0.0,
       "pn_gain": 4.0,
       "pn_roll_cap_deg": 10.0,
-      "roll_align_gate": 0.10,
+      "roll_align_gate": 0.1,
       "speed_source": "closing",
       "max_roll_deg": 20.0,
       "max_pitch_down_deg": 20.0,
       "max_pitch_up_deg": 25.0,
-      "hover_pwm": 1670.0,
-      "thr_min_pwm": 1400.0,
+      "hover_pwm": 1430.0,
+      "thr_min_pwm": 1180.0,
       "thr_max_pwm": 1950.0,
       "target_width_m": 0.55,
       "hit_range_m": 0.8,
@@ -24,14 +24,15 @@
       "closing_fit_n": 8,
       "range_lpf_tau_s": 0.25,
       "range_lpf_min_range_m": 12.0,
-      "pn_rate_lpf_s": 0.35,
+      "pn_rate_lpf_s": 0.15,
       "pn_vc_min_mps": 2.0,
       "pn_vc_max_mps": 12.0,
       "ki_z": 0.0,
       "ki_pitch": 0.0,
       "ki_roll": 0.0,
       "ki_e_range_m": 0.0,
-      "ki_e_leak_s": 1.5
+      "ki_e_leak_s": 1.5,
+      "lift_ff": true
     }
   },
   "safety": {
@@ -41,6 +42,7 @@
   },
   "control": {
     "angle_limit_deg": 60.0,
-    "rc_rate_limit": 60
+    "rc_rate_limit": 60,
+    "hover_throttle": 1430
   }
 }

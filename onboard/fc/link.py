@@ -42,10 +42,12 @@ class LinkError(RuntimeError):
 class SerialTransport:
     """pyserial-backed transport. Imported lazily so TCP/SITL works without it."""
 
-    def __init__(self, port: str, baud: int = 115200, read_timeout_s: float = 0.05):
+    def __init__(self, port: str, baud: int = 115200, read_timeout_s: float = 0.05,
+                 write_timeout_s: float = 0.05):
         self.port = str(port)
         self.baud = int(baud)
         self.read_timeout_s = float(read_timeout_s)
+        self.write_timeout_s = float(write_timeout_s)
         self._ser = None
 
     @property
@@ -67,27 +69,29 @@ class SerialTransport:
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 timeout=self.read_timeout_s,
+                write_timeout=self.write_timeout_s,
             )
         except (serial.SerialException, OSError, FileNotFoundError) as exc:
             self._ser = None
             raise LinkError("cannot open serial port %s: %s" % (self.port, exc)) from exc
 
     def read(self, timeout_s: float) -> bytes:
-        if not self.is_open:
+        ser = self._ser
+        if ser is None or not bool(getattr(ser, "is_open", False)):
             raise LinkError("serial port is not open")
-        self._ser.timeout = max(0.001, float(timeout_s))
+        ser.timeout = max(0.001, float(timeout_s))
         try:
-            waiting = int(getattr(self._ser, "in_waiting", 0) or 0)
-            return self._ser.read(waiting if waiting > 0 else 1)
+            waiting = int(getattr(ser, "in_waiting", 0) or 0)
+            return ser.read(waiting if waiting > 0 else 1)
         except Exception as exc:
             raise LinkError("serial read failed: %s" % exc) from exc
 
     def write(self, data: bytes) -> None:
-        if not self.is_open:
+        ser = self._ser
+        if ser is None or not bool(getattr(ser, "is_open", False)):
             raise LinkError("serial port is not open")
         try:
-            self._ser.write(data)
-            self._ser.flush()
+            ser.write(data)
         except Exception as exc:
             raise LinkError("serial write failed: %s" % exc) from exc
 
@@ -232,24 +236,28 @@ class MspLink:
             self._parser.reset()
             return True
 
-    def _drop(self, exc) -> None:
-        self._connected = False
-        self.errors += 1
-        self.last_error = str(exc)
-        try:
-            self._transport.close()
-        except Exception:
-            pass
+    def _drop(self, exc, expected_gen: Optional[int] = None) -> None:
+        with self._connect_lock:
+            if expected_gen is not None and self._generation != expected_gen:
+                return
+            self._connected = False
+            self.errors += 1
+            self.last_error = str(exc)
+            try:
+                self._transport.close()
+            except Exception:
+                pass
 
     # -- low-level IO ------------------------------------------------------
     def _write_frame(self, frame: bytes) -> bool:
         with self._write_lock:
             if not self._ensure_connected():
                 return False
+            gen = self._generation
             try:
                 self._transport.write(frame)
             except Exception as exc:
-                self._drop(exc)
+                self._drop(exc, expected_gen=gen)
                 return False
             self.tx_frames += 1
             return True
@@ -266,6 +274,7 @@ class MspLink:
         with self._query_lock:
             if not self._write_frame(frame):
                 return None
+            gen = self._generation
             if timeout_s <= 0.0:
                 return None
             deadline = time.monotonic() + timeout_s
@@ -276,7 +285,7 @@ class MspLink:
                 try:
                     chunk = self._transport.read(min(0.05, remaining))
                 except Exception as exc:
-                    self._drop(exc)
+                    self._drop(exc, expected_gen=gen)
                     return None
                 if not chunk:
                     continue

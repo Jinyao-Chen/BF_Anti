@@ -134,6 +134,7 @@ def test_engaged_with_confirmed_target_publishes_track_cmd():
     app, mux, _, _ = build_app(det, state=fresh_state(now))
     app._engaged = True
     app.step_once(now)
+    app.detector.detection = Detection((600.0, 320.0, 680.0, 400.0), 0.9, t=now + 0.02)
     out, decision = app.step_once(now + 0.02)
     assert out.confirmed and out.channels is not None
     assert decision.allow_auto, decision.reason
@@ -188,3 +189,25 @@ def test_stale_rc_immediately_closes_gate():
     assert not decision.allow_auto
     assert decision.critical
     assert mux.cmds[-1] is None
+
+
+def test_fc_angle_mode_with_rate_profile_is_denied():
+    now = time.monotonic()
+    st = fresh_state(now)
+    st.flight_mode_flags = 1  # Betaflight ANGLE_MODE is bit 0
+    app, _, _, _ = build_app(state=st)
+    app._engaged = True
+    _, decision = app.step_once(now)
+    assert not decision.allow_auto
+    assert decision.reason == "att_mode_mismatch"
+
+
+def test_request_stop_still_publishes_one_last_passthrough():
+    app, mux, _, _ = build_app()
+    app.request_stop("sigterm")
+    app.mux = FakeMux()
+    app.stop("sigterm")
+    assert app.mux.cmds == [None]
+    # Idempotent: a second stop must not sleep/publish again.
+    app.stop("sigterm")
+    assert app.mux.cmds == [None]

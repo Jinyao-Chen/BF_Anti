@@ -1,5 +1,5 @@
 {
-  "profile": "real_pn8_angle",
+  "profile": "real_pn8_rate",
   "log_dir": "/home/pi5/bf_anti_logs",
   "telemetry": {
     "enabled": true,
@@ -15,7 +15,7 @@
     "baud": 115200,
     "tcp_host": "",
     "tcp_port": 5761,
-    "telemetry_hz": 25,
+    "telemetry_hz": 50,
     "rc_hz": 50,
     "reply_timeout_s": 0.15,
     "link_timeout_s": 0.6,
@@ -48,6 +48,8 @@
     "vfov_deg": null,
     "tilt_deg": 40,
     "yaw_offset_deg": 0,
+    "dist_coeffs": null,
+    "latency_s": 0.0,
     "warmup_s": 1
   },
   "detector": {
@@ -86,7 +88,8 @@
     "target_confirm_s": 0.1,
     "target_lost_s": 0.4,
     "lost_reset_s": 1.5,
-    "fault_latch": true
+    "fault_latch": true,
+    "battery_debounce_s": 1.0
   },
   "video": {
     "enabled": true,
@@ -101,7 +104,7 @@
   },
   "control": {
     "rate_hz": 50,
-    "att_mode": "angle",
+    "att_mode": "rate",
     "att_rate_gain": 6,
     "rate_max_dps": 250,
     "rate_full_dps": 600,

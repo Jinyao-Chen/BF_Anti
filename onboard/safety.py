@@ -43,6 +43,9 @@ class SafetyInputs:
     # which a stale field denies auto but does not latch.  A slow first MSP
     # exchange is a boot artefact, not a fault the pilot must acknowledge.
     warmup_grace: bool = False
+    # Optional FC actual flight-mode check to prevent ANGLE vs ACRO mismatch.
+    angle_mode_active: bool | None = None
+    expected_att_mode: str | None = None
 
 
 @dataclass
@@ -58,15 +61,19 @@ class SafetySupervisor:
         cfg: SafetyConfig,
         require_override: bool = True,
         require_engage: bool = True,
+        battery_debounce_s: float = 0.0,
     ) -> None:
         self.cfg = cfg
         self.require_override = bool(require_override)
         self.require_engage = bool(require_engage)
+        self.battery_debounce_s = max(0.0, float(battery_debounce_s))
         self._latched: str | None = None
+        self._low_batt_since: float | None = None
         self.last: SafetyDecision | None = None
 
     def reset(self) -> None:
         self._latched = None
+        self._low_batt_since = None
         self.last = None
 
     def _critical(self, reason: str) -> SafetyDecision:
@@ -102,15 +109,31 @@ class SafetySupervisor:
         if inp.status_age_s > c.max_status_age_s:
             return stale("status_stale")
         if inp.loop_dt_s > c.max_loop_dt_s:
-            return self._critical("loop_overrun")
+            return stale("loop_overrun")
         if c.min_battery_v > 0.0 and 0.0 < inp.battery_v < c.min_battery_v:
-            return self._critical("battery_low")
+            if self.battery_debounce_s <= 0.0:
+                return self._critical("battery_low")
+            if self._low_batt_since is None:
+                self._low_batt_since = float(inp.now)
+            if (float(inp.now) - self._low_batt_since) >= self.battery_debounce_s:
+                return self._critical("battery_low")
+            # Debounce is not permission to fly: keep auto denied while the
+            # pack is below threshold, but do not latch yet.
+            return self._deny("battery_low_pending")
+        else:
+            self._low_batt_since = None
 
         if self._latched is not None:
             return self._deny("latched:" + self._latched)
 
         if not inp.armed:
             return self._deny("disarmed")
+        if inp.expected_att_mode is not None and inp.angle_mode_active is not None:
+            exp = str(inp.expected_att_mode).lower()
+            if (exp == "angle" and not inp.angle_mode_active) or (
+                exp == "rate" and inp.angle_mode_active
+            ):
+                return self._deny("att_mode_mismatch")
         if self.require_override and not inp.override_on:
             return self._deny("override_off")
         if self.require_engage and not inp.engage_on:

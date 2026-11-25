@@ -299,7 +299,6 @@ class HailoDetector:
 
     # -- worker ----------------------------------------------------------
     def _run(self) -> None:
-        self._stop.clear()
         try:
             while not self._stop.is_set():
                 if self._configured is None:
@@ -367,7 +366,12 @@ class HailoDetector:
             return None, 0.0
         if frame is None:
             return None, 0.0
-        return frame, float(stamp)
+        stamp_f = float(stamp)
+        last_stamp = getattr(self, "_last_consumed_stamp", -1.0)
+        if stamp_f > 0.0 and stamp_f <= last_stamp:
+            return None, 0.0
+        self._last_consumed_stamp = stamp_f
+        return frame, stamp_f
 
     def _configure(self) -> None:
         if not self.hef:

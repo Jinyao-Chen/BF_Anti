@@ -27,25 +27,30 @@ class TargetKF:
         self.meas_pos_var = float(meas_pos_var)
         self.gate_chi2 = float(gate_chi2)
         self.max_dt = float(max_dt)
+        self._init_pos_var = float(init_pos_var)
+        self._init_vel_var = float(init_vel_var)
+        self._init_acc_var = float(init_acc_var)
 
         self.x = np.zeros(9, dtype=float)
         self.P = np.diag(
-            [init_pos_var] * 3 + [init_vel_var] * 3 + [init_acc_var] * 3
+            [self._init_pos_var] * 3 + [self._init_vel_var] * 3 + [self._init_acc_var] * 3
         ).astype(float)
         self.initialized = False
         self.last_t: Optional[float] = None
         self.rejected = 0
+        self._consec_rejected = 0
 
     # ------------------------------------------------------------------ #
     def reset(self, position: np.ndarray) -> None:
         self.x = np.zeros(9, dtype=float)
         self.x[0:3] = np.asarray(position, dtype=float)
         self.P = np.diag(
-            [4.0] * 3 + [25.0] * 3 + [100.0] * 3
+            [self._init_pos_var] * 3 + [self._init_vel_var] * 3 + [self._init_acc_var] * 3
         ).astype(float)
         self.initialized = True
         self.last_t = None
         self.rejected = 0
+        self._consec_rejected = 0
 
     @property
     def position(self) -> np.ndarray:
@@ -113,10 +118,18 @@ class TargetKF:
         d2 = float(y.T @ S_inv @ y)
         if d2 > self.gate_chi2:
             self.rejected += 1
+            self._consec_rejected += 1
+            if self._consec_rejected >= 5:
+                self.reset(z)
+                return True
             return False
+        self._consec_rejected = 0
+        R = np.eye(3) * r
         K = self.P @ H.T @ S_inv
+        I_KH = np.eye(9) - K @ H
         self.x = self.x + K @ y
-        self.P = (np.eye(9) - K @ H) @ self.P
+        # Joseph form preserves symmetry and positive-definiteness
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
         return True
 
 

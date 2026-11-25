@@ -29,6 +29,7 @@ def test_step_once_records_fc_rc_detection_and_command(tmp_path):
     app._engaged = True
     try:
         app.step_once(now)
+        app.detector.detection = Detection((600.0, 320.0, 680.0, 400.0), 0.9, t=now + 0.02)
         app.step_once(now + 0.02)
     finally:
         tlog.close("test_rows")

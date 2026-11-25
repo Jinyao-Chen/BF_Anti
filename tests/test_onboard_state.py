@@ -57,7 +57,8 @@ def _cfg():
 def test_single_poll_decodes_all_fields_and_uses_degrees():
     link = FakeLink(_responses(), generation=5, errors=2)
     estimator = FcStateEstimator(link, _cfg())
-    estimator._poll_once()
+    for _ in range(5):
+        estimator._poll_once()
     state = estimator.snapshot()
 
     assert isinstance(state, FcState)
@@ -101,7 +102,8 @@ def test_empty_msp_rc_reply_leaves_rc_unreceived():
     responses[(MSP_CMD.GET_RC, False)] = b""
     link = FakeLink(responses)
     estimator = FcStateEstimator(link, _cfg())
-    estimator._poll_once()
+    for _ in range(2):
+        estimator._poll_once()
     state = estimator.snapshot()
     assert state.rc == (1500,) * 16     # FcState default, not a received value
     assert state.rc_t == 0.0
@@ -134,7 +136,8 @@ def test_stale_replies_hold_last_value_with_old_timestamp():
     responses = _responses()
     link = FakeLink(responses)
     estimator = FcStateEstimator(link, _cfg())
-    estimator._poll_once()
+    for _ in range(5):
+        estimator._poll_once()
     first = estimator.snapshot()
     att_t = first.att_t
 
@@ -189,7 +192,8 @@ def test_slow_poll_timestamps_each_reply_not_the_poll_start():
 
     estimator = FcStateEstimator(SlowLink(_responses()), _cfg())
     t0 = time.monotonic()
-    estimator._poll_once()
+    for _ in range(3):
+        estimator._poll_once()
     state = estimator.snapshot()
     # RC is the third query of the tick: with per-reply stamps it is at least
     # ~0.1 s newer than the poll start, so it is not "born stale".

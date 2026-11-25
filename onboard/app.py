@@ -85,11 +85,16 @@ class OnboardApp:
             cfg.safety,
             require_override=cfg.fc.require_override,
             require_engage=cfg.fc.require_engage,
+            battery_debounce_s=cfg.safety.battery_debounce_s,
         )
         self._engaged = False
+        self._reset_lock = threading.Lock()
         self._pending_reset: Optional[str] = None
+        self._pending_hover_pwm: Optional[int] = None
         self._stop = threading.Event()
+        self._stop_reason = "stop"
         self._stop_logged = False
+        self._cleanup_started = False
         self._last_step: Optional[float] = None
         self._last_dt: float = 0.0
         self._built = False
@@ -165,16 +170,20 @@ class OnboardApp:
         # Called from the mux thread.  Do not touch the guidance/tracker state
         # here: defer the reset to the control tick so the 50 Hz loop never
         # sees a half-reset guidance object.
-        self._engaged = True
-        self._pending_reset = "engage"
+        with self._reset_lock:
+            self._engaged = True
+            self._pending_reset = "engage"
+            self._pending_hover_pwm = int(engaged_throttle)
         LOG.info("auto engaged, pilot throttle=%s", engaged_throttle)
         self._event("engaged", engaged=True, throttle=int(engaged_throttle))
 
     def _on_disengage(self) -> None:
         if self._engaged:
             LOG.info("auto disengaged -> pilot")
-        self._engaged = False
-        self._pending_reset = "disengage"
+        with self._reset_lock:
+            self._engaged = False
+            self._pending_reset = "disengage"
+            self._pending_hover_pwm = None
         self._event("engaged", engaged=False)
 
     # -- telemetry ---------------------------------------------------------
@@ -420,23 +429,31 @@ class OnboardApp:
             estop=self._stop.is_set(),
             fc_seen=fc_seen,
             warmup_grace=warmup_grace,
+            # Verify the FC's actual mode instead of trusting the profile:
+            # att_mode=rate needs ACRO (ANGLE off); angle needs ANGLE on.
+            angle_mode_active=bool(int(getattr(state, "flight_mode_flags", 0) or 0) & 0x1),
+            expected_att_mode=str(self.cfg.control.att_mode).lower(),
         )
 
     def step_once(self, now: Optional[float] = None) -> tuple[ControlOutput, SafetyDecision]:
         self._ensure_built()
         now = time.monotonic() if now is None else float(now)
-        if self._pending_reset is not None:
-            try:
-                if self._pending_reset == "engage":
-                    # Keep the tracker lock, but clear guidance integrators and
-                    # any safety latch from before the pilot engaged.
-                    self.controller.guidance.reset()
-                    self.safety.reset()
-                else:
-                    self.controller.reset()
-                    self.safety.reset()
-            finally:
-                self._pending_reset = None
+        with self._reset_lock:
+            pending_reset = self._pending_reset
+            pending_hover = self._pending_hover_pwm
+            self._pending_reset = None
+            self._pending_hover_pwm = None
+        if pending_reset is not None:
+            if pending_reset == "engage":
+                # Keep the tracker lock, clear guidance integrators/history,
+                # and adapt hover_pwm to the pilot's real hover throttle.
+                self.controller.guidance.reset()
+                if pending_hover is not None and 1250 <= int(pending_hover) <= 1700:
+                    self.controller.guidance.hover_pwm = float(pending_hover)
+                self.safety.reset()
+            else:
+                self.controller.reset()
+                self.safety.reset()
         period = 1.0 / max(1.0, float(self.cfg.control.rate_hz))
         self._last_dt = period if self._last_step is None else (now - self._last_step)
         self._last_step = now
@@ -463,7 +480,9 @@ class OnboardApp:
             )
 
         detection = self.detector.latest(self.cfg.safety.max_det_age_s, now)
-        out = self.controller.step(detection, state, now, self._last_dt)
+        out = self.controller.step(
+            detection, state, now, self._last_dt, state_estimator=self.state,
+        )
         decision = self.safety.evaluate(self._safety_inputs(state, detection, out, now))
 
         # The mux owns engagement; the app only publishes a fresh command
@@ -492,19 +511,20 @@ class OnboardApp:
             frame = None
             frame_t = 0.0
             video_det = detection
-            if self.camera is not None:
-                frame, frame_t = self.camera.latest(self.cfg.safety.max_det_age_s, now)
-            # Prefer the detector's frame+box pair for the OSD.  Drawing a
-            # 40-80 ms old box on a newer camera frame is exactly the "box
-            # lags the aircraft" artefact seen in the GUI before the async fix.
+            # Prefer the detector's frame+box pair for the OSD without an
+            # unnecessary camera.latest() lock when a paired frame is ready.
+            used_pair = False
             if hasattr(self.detector, "latest_pair"):
                 pair_frame, pair_det = self.detector.latest_pair(0.35, now)
                 if pair_frame is not None:
                     frame = pair_frame
                     frame_t = float(getattr(pair_det, "t", 0.0) or now)
                     video_det = pair_det
+                    used_pair = True
                 else:
                     video_det = None
+            if not used_pair and self.camera is not None:
+                frame, frame_t = self.camera.latest(self.cfg.safety.max_det_age_s, now)
             try:
                 self.video.submit(
                     frame, video_det, out, state, decision, now, frame_t
@@ -622,6 +642,13 @@ class OnboardApp:
                         LOG.debug("auto gate closed: %s", decision.reason)
                 except Exception as exc:
                     LOG.exception("control tick failed")
+                    if self.mux is not None:
+                        try:
+                            if hasattr(self.mux, "request_auto"):
+                                self.mux.request_auto(False)
+                            self.mux.publish_cmd(None)
+                        except Exception:
+                            pass
                     # Telemetry rows are written after the tick; record why they
                     # stopped instead of leaving a silently short CSV.
                     if now - self._last_tick_error_event_t >= 1.0:
@@ -652,19 +679,27 @@ class OnboardApp:
                 else:
                     next_t = time.monotonic()
         finally:
-            self.stop(stop_reason)
+            final_reason = self._stop_reason if self._stop_reason != "stop" else stop_reason
+            self.stop(final_reason)
         return 0
 
-    def stop(self, reason: str = "stop") -> None:
-        already_stopped = self._stop.is_set()
+    def request_stop(self, reason: str = "stop") -> None:
+        """Async-signal-safe stop trigger; cleanup runs in run()'s finally block."""
+        self._stop_reason = str(reason)
         self._stop.set()
+
+    def stop(self, reason: str = "stop") -> None:
+        self._stop.set()
+        if self._cleanup_started:
+            return
+        self._cleanup_started = True
         if not self._stop_logged:
             self._stop_logged = True
             self._event("run_stop_requested", reason=str(reason))
         # Betaflight 4.5.x holds the last MSP override values if the sender
         # disappears.  Give the mux a few frames of pilot passthrough before
         # it stops, and make the required pilot action unmistakable in the log.
-        if self.mux is not None and not already_stopped:
+        if self.mux is not None:
             try:
                 self.mux.publish_cmd(None)
                 time.sleep(0.12)
@@ -770,8 +805,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         cfg.detector.backend, log_dir,
     )
     app = OnboardApp(cfg, telemetry=tlog)
-    signal.signal(signal.SIGINT, lambda *_: app.stop("sigint"))
-    signal.signal(signal.SIGTERM, lambda *_: app.stop("sigterm"))
+    signal.signal(signal.SIGINT, lambda *_: app.request_stop("sigint"))
+    signal.signal(signal.SIGTERM, lambda *_: app.request_stop("sigterm"))
     try:
         return app.run()
     except Exception:

@@ -9,8 +9,6 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-import numpy as np
-
 from guidance.p_visual_guidance import (
     PStrikeCommand,
     PStrikePhase,
@@ -60,6 +58,7 @@ class Controller:
             RC_MID, RC_MID, int(cfg.control.hover_throttle), RC_MID,
         )
         self._last_seen: float = 0.0
+        self._last_det_t: float = -math.inf
         self._had_lock: bool = False
         self._last_out = ControlOutput()
         self.last_command: Optional[PStrikeCommand] = None
@@ -69,6 +68,7 @@ class Controller:
         self.tracker.reset()
         self._prev_rpyt = (RC_MID, RC_MID, int(self.cfg.control.hover_throttle), RC_MID)
         self._last_seen = 0.0
+        self._last_det_t = -math.inf
         self._had_lock = False
         self.last_command = None
         self._last_out = ControlOutput()
@@ -126,10 +126,23 @@ class Controller:
             k_att = float(getattr(c, "att_rate_gain", 6.0))
             rate_max = float(getattr(c, "rate_max_dps", 250.0))
             rpy = getattr(state, "rpy_deg", (0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0)
-            roll_rate = max(-rate_max, min(rate_max, k_att * (float(cmd.roll_cmd_deg) - float(rpy[0]))))
-            pitch_rate = max(-rate_max, min(rate_max, k_att * (float(cmd.pitch_cmd_deg) - float(rpy[1]))))
+            phi_rad = math.radians(float(rpy[0]))
+            theta_rad = math.radians(float(rpy[1]))
+            dphi = k_att * (float(cmd.roll_cmd_deg) - float(rpy[0]))
+            dtheta = k_att * (float(cmd.pitch_cmd_deg) - float(rpy[1]))
+            dpsi = float(cmd.yaw_rate_dps)
+            # Euler-rate to body-rate transform prevents large-pitch yaw/roll coupling
+            p_dps = dphi - dpsi * math.sin(theta_rad)
+            q_dps = dtheta * math.cos(phi_rad) + dpsi * math.sin(phi_rad) * math.cos(theta_rad)
+            r_dps = -dtheta * math.sin(phi_rad) + dpsi * math.cos(phi_rad) * math.cos(theta_rad)
+            roll_rate = max(-rate_max, min(rate_max, p_dps))
+            pitch_rate = max(-rate_max, min(rate_max, q_dps))
+            yaw_rate_body = max(-yaw_full, min(yaw_full, r_dps))
+            cmd_body = PStrikeCommand(
+                **{**cmd.__dict__, "yaw_rate_dps": yaw_rate_body}
+            )
             channels = p_cmd_to_rc(
-                cmd,
+                cmd_body,
                 angle_limit_deg=angle_limit,
                 yaw_full_rate_dps=yaw_full,
                 prev=self._prev_rpyt,
@@ -164,26 +177,57 @@ class Controller:
         state: FcState,
         now: float,
         dt: float,
+        state_estimator=None,
     ) -> ControlOutput:
         dt = max(1e-3, min(float(dt), 0.5))
         max_age = float(self.cfg.safety.max_det_age_s)
         det_age = 0.0
+        det_t = 0.0
         if detection is not None and detection.t > 0.0:
-            det_age = max(0.0, float(now) - float(detection.t))
+            det_t = float(detection.t)
+            det_age = max(0.0, float(now) - det_t)
             if det_age > max_age:
                 detection = None
-        bbox = detection.bbox if detection is not None else None
-        bbox = self._predict_bbox(bbox, det_age)
 
-        track = self.tracker.update(bbox, dt=dt, timestamp=now)
+        # Deduplicate repeated historical detections from the 50 Hz loop so
+        # BboxTracker.fresh stays False on missed/repeated frames.
+        is_new_det = detection is not None and (
+            det_t <= 0.0 or det_t > self._last_det_t + 1e-9
+        )
+        if is_new_det:
+            if det_t > 0.0:
+                self._last_det_t = det_t
+            raw_bbox = detection.bbox
+            track = self.tracker.update(
+                raw_bbox, dt=dt, timestamp=(det_t if det_t > 0.0 else now),
+            )
+        else:
+            track = self.tracker.update(None, dt=dt, timestamp=now)
+
         if track.fresh:
             self._last_seen = now
         bbox = track.bbox
 
         if bbox is None or not track.confirmed:
-            if self._had_lock and (now - self._last_seen) > float(self.cfg.safety.lost_reset_s):
-                self.guidance.reset()
-                self._had_lock = False
+            if self._had_lock:
+                lost_for = now - self._last_seen
+                if lost_for > float(self.cfg.safety.lost_reset_s):
+                    self.guidance.reset()
+                    self._had_lock = False
+                elif lost_for <= float(getattr(self.guidance, "lost_timeout_s", 0.0)):
+                    pos, vel = self._own_inputs(state)
+                    cmd = self.guidance.update(
+                        None, pos, vel, state.rpy_deg, float(now), dt, fresh=False,
+                    )
+                    self.last_command = cmd
+                    if cmd.phase == PStrikePhase.COAST:
+                        channels = self._rpyt(cmd, state)
+                        self._prev_rpyt = channels
+                        self._last_out = ControlOutput(
+                            mode=Mode.TRACK, channels=channels, command=cmd,
+                            confirmed=True, reason="coast",
+                        )
+                        return self._last_out
             self._last_out = ControlOutput(
                 mode=Mode.SEARCH, channels=None, command=None,
                 confirmed=False, reason=track.reason,
@@ -191,6 +235,22 @@ class Controller:
             return self._last_out
 
         self._had_lock = True
+        # Forward-predict once for guidance without feeding extrapolated pixels
+        # back into BboxTracker velocity estimation.
+        pred_age = (now - self._last_det_t) if self._last_det_t > 0.0 else det_age
+        bbox_for_guid = self._predict_bbox(bbox, pred_age) if track.fresh else bbox
+
+        # Use historical attitude interpolated at image capture time when available.
+        rpy_for_los = state.rpy_deg
+        if (
+            track.fresh
+            and self._last_det_t > 0.0
+            and state_estimator is not None
+            and hasattr(state_estimator, "attitude_at")
+        ):
+            cam_lat = float(getattr(self.cfg.camera, "latency_s", 0.0) or 0.0)
+            rpy_for_los = state_estimator.attitude_at(self._last_det_t - cam_lat)
+
         pos, vel = self._own_inputs(state)
         u_rate = None
         try:
@@ -198,10 +258,10 @@ class Controller:
         except AttributeError:
             u_rate = None
         cmd = self.guidance.update(
-            bbox,
+            bbox_for_guid,
             pos,
             vel,
-            state.rpy_deg,
+            rpy_for_los,
             float(now),
             dt,
             fresh=track.fresh,

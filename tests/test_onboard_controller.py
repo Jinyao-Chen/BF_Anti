@@ -34,6 +34,22 @@ def test_no_detection_returns_no_channels():
     assert out.channels is None
 
 
+def test_repeated_stale_detection_is_not_fresh():
+    c = Controller(make_cfg())
+    st = make_state()
+    now = time.monotonic()
+    det = Detection((600.0, 320.0, 680.0, 400.0), 0.9, t=now)
+    c.step(det, st, now, 0.02)
+    # Reusing the same detection timestamp at 50 Hz must not look like a new
+    # measurement: the tracker coasts instead of confirming a false lock.
+    out = c.step(det, st, now + 0.02, 0.02)
+    assert not out.confirmed
+    assert out.reason == "coast"
+    det2 = Detection((600.0, 320.0, 680.0, 400.0), 0.9, t=now + 0.04)
+    out = c.step(det2, st, now + 0.04, 0.02)
+    assert out.confirmed
+
+
 def test_confirmed_detection_returns_only_four_channels():
     c = Controller(make_cfg())
     st = make_state()
@@ -41,7 +57,8 @@ def test_confirmed_detection_returns_only_four_channels():
     det = Detection((600.0, 320.0, 680.0, 400.0), 0.9, t=now)
     out = c.step(det, st, now, 0.02)
     assert out.channels is None  # confirm_frames=2
-    out = c.step(det, st, now + 0.02, 0.02)
+    det2 = Detection((601.0, 320.0, 681.0, 400.0), 0.9, t=now + 0.02)
+    out = c.step(det2, st, now + 0.02, 0.02)
     assert out.confirmed
     assert out.channels is not None
     assert len(out.channels) == 4
@@ -59,7 +76,8 @@ def test_channels_are_rate_limited():
     c.step(det, st, now, 0.02)
     prev = None
     for i in range(6):
-        out = c.step(det, st, now + 0.02 * (i + 1), 0.02)
+        di = Detection((600.0 + i, 320.0, 680.0 + i, 400.0), 0.9, t=now + 0.02 * (i + 1))
+        out = c.step(di, st, now + 0.02 * (i + 1), 0.02)
         if out.channels is None:
             continue
         if prev is not None:
@@ -75,7 +93,8 @@ def test_hit_hands_back_to_pilot():
     det = Detection((0.0, 0.0, 1280.0, 720.0), 0.99, t=now)
     out = None
     for i in range(4):
-        out = c.step(det, st, now + 0.02 * i, 0.02)
+        di = Detection(det.bbox, 0.99, t=now + 0.02 * i)
+        out = c.step(di, st, now + 0.02 * i, 0.02)
         if out.mode == Mode.HIT:
             break
     assert out is not None

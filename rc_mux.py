@@ -51,6 +51,7 @@ class RCMux:
         self.auto_engage = bool(auto_engage)
         self._mode_pos = 0          # 0 manual, 1 auto, 2 strike
         self._mode_prev = 0
+        self._safe_hover_thr = int(base_throttle)
         self._mode_raw = 1500
         self._mode_seen_low = False
         self._auto_request = False
@@ -169,14 +170,26 @@ class RCMux:
             self._update_mode(ch)
         else:
             self._update_switch(ch)
+        # Only sample pilot throttle when BOXMSPOVERRIDE is OFF (mode_pos == 0)
+        # so MSP_RC echo values never overwrite the safe hover reference.
+        override_active = (self.mode_channel is not None and self._mode_pos > 0)
+        if not override_active:
+            # Never let a low/dropped pilot stick become the fail-safe
+            # throttle: keep at least the configured hover value.
+            self._safe_hover_thr = _clamp(max(int(ch[2]), int(self.base_throttle)))
         if self._auto and self.stick_takeover and self._takeover(ch):
             self._exit_auto()
             self._inhibit = True
 
         if self._auto:
-            rpyt = self._select_rpyt(now, ch)
+            rpyt = self._select_rpyt(now, ch, override_active=override_active)
+        elif override_active:
+            # Betaflight 4.5 MSP_RC returns overridden RPYT while BOXMSPOVERRIDE
+            # is active; echoing ch[0..3] back latches the last dive/throttle.
+            # Send safe level hover instead until the pilot flips CH8 low.
+            rpyt = (1500, 1500, self._safe_hover_thr, 1500)
         else:
-            # 透传飞手 RPYT — AUX3 切高位时 FC 立刻用 MSP 值, 必须无缝衔接
+            # Physical manual mode: passthrough pilot RPYT seamlessly.
             rpyt = (ch[0], ch[1], ch[2], ch[3])
 
         # AUX1..4 (16 通道时还包括 AUX5..12) 只透传飞手缓存值, 绝不改写成
@@ -198,6 +211,7 @@ class RCMux:
             self._was_substituting = False
             self._switch_prev = False
             self._switch_seen_low = False
+            self._mode_seen_low = False
             self._mode_pos = 0
             self._inhibit = True
             if self._auto:
@@ -280,10 +294,14 @@ class RCMux:
             sw = True
         else:
             sw = self._switch_prev
-        rising = sw and not self._switch_prev
+        prev_sw = self._switch_prev
+        rising = sw and not prev_sw
         self._switch_prev = sw
         if not sw and self._auto:
             self._exit_auto()
+        elif not sw and prev_sw and self.on_disengage:
+            # Allow pilot to clear a latched safety fault by cycling switch low.
+            self.on_disengage()
         elif (rising and not self._auto and self._switch_seen_low
               and not self._inhibit):
             self._enter_auto(ch)
@@ -294,20 +312,23 @@ class RCMux:
                 return True
         return abs(ch[2] - self.engaged_throttle) > self.THR_TAKEOVER_DELTA
 
-    def _select_rpyt(self, now, ch):
+    def _select_rpyt(self, now, ch, override_active: bool = False):
         cmd = self._cmd
         fresh = (self._auto and cmd is not None
                  and (now - cmd.t) <= self.cmd_timeout)
         if not fresh:
             self._was_substituting = False
             self.mode = "PASSTHROUGH"
+            if override_active:
+                return (1500, 1500, self._safe_hover_thr, 1500)
             return (ch[0], ch[1], ch[2], ch[3])
         if not self._was_substituting:
             self._ramp_start = now
-            # Recapture the pilot's current throttle.  AUTO may have paused
-            # for a target loss while the pilot climbed/descended; ramping
-            # from the old capture value would cause a throttle step.
-            self.engaged_throttle = ch[2]
+            # In FC override mode, ch[2] is the MSP echo, so anchor to the
+            # last throttle sampled while BOXMSPOVERRIDE was OFF.
+            self.engaged_throttle = (
+                self._safe_hover_thr if override_active else ch[2]
+            )
             self._was_substituting = True
         self.mode = "AUTO"
         blend = min(1.0, (now - self._ramp_start) / self.RAMP_TIME)
@@ -319,7 +340,12 @@ class RCMux:
 
     def _enter_auto(self, ch):
         self._auto = True
-        self.engaged_throttle = ch[2]
+        override_active = (self.mode_channel is not None and self._mode_pos > 0)
+        # While BOXMSPOVERRIDE is active, MSP_RC echoes our own last frame;
+        # anchor to the throttle sampled before override instead.
+        self.engaged_throttle = (
+            self._safe_hover_thr if override_active else int(ch[2])
+        )
         self._was_substituting = False
         if self.on_engage:
             self.on_engage(self.engaged_throttle)
