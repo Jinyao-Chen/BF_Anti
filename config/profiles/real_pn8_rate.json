@@ -57,6 +57,7 @@
     "att_mode": "rate",
     "hover_throttle": 1430,
     "angle_limit_deg": 60,
-    "yaw_full_rate_dps": 300
+    "yaw_full_rate_dps": 300,
+    "rc_slew_rate_per_s": 1200.0
   }
 }

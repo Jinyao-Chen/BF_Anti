@@ -45,8 +45,10 @@ class MSP_CMD:
     BOXNAMES          = 116
     BOXIDS            = 119
     MODE_RANGES       = 34
+    RX_MAP            = 64
     GET_STATUS_EX     = 150
     SET_RAW_RC        = 200
+    MODE_RANGES_EXTRA = 238
     # MSP2 (native v2) command; payload layout is firmware-specific.
     MSP2_POSITION_STATE = 0x3015
 
@@ -447,6 +449,11 @@ class FrameParser:
     """
 
     MAX_BUFFER = 65536
+    # MSP is a control link, not a bulk file transport.  Betaflight's largest
+    # legitimate reply (BOXNAMES/BOXIDS pages) is well below this; rejecting
+    # larger advertised lengths lets the parser resynchronise immediately
+    # instead of waiting for tens of kilobytes that will never arrive.
+    MAX_FRAME_PAYLOAD = 2048
 
     def __init__(self):
         self._buf = bytearray()
@@ -509,11 +516,14 @@ class FrameParser:
                 return None
             cmd = struct.unpack_from("<H", self._buf, 4)[0]
             size = struct.unpack_from("<H", self._buf, 6)[0]
+            # Check the advertised length BEFORE waiting for the payload.  A
+            # corrupt uint16 can otherwise park the parser for tens of kB
+            # while valid telemetry piles up behind it.
+            if size > self.MAX_FRAME_PAYLOAD:
+                return (None, 1, True)
             total = 9 + size
             if len(self._buf) < total:
                 return None
-            if size > self.MAX_BUFFER:
-                return (None, 1, True)
             crc = self._buf[8 + size]
             calc = crc8_dvb_s2(self._buf[3:8 + size])
             if crc != calc:
@@ -529,7 +539,7 @@ class FrameParser:
             if len(self._buf) < 7:
                 return None
             real_size = struct.unpack_from("<H", self._buf, 5)[0]
-            if real_size < MSP_V1_SIZE_LIMIT:
+            if real_size < MSP_V1_SIZE_LIMIT or real_size > self.MAX_FRAME_PAYLOAD:
                 return (None, 1, True)
             total = 8 + real_size
             if len(self._buf) < total:
@@ -774,6 +784,41 @@ def decode_mode_ranges(payload):
             "channel_index": 4 + aux_index,
         })
     return ranges
+
+
+def decode_rx_map(payload):
+    """MSP_RX_MAP (64) -> tuple of input-channel positions per internal axis.
+
+    Betaflight stores ``rcmap`` in internal AERT order: rcmap[0] is the
+    physical input channel used for roll, rcmap[1] for pitch, rcmap[2] for
+    yaw, rcmap[3] for throttle.  ``map AETR1234`` is therefore (0, 1, 3, 2).
+    """
+    if not payload or len(payload) < 4:
+        return None
+    return tuple(int(b) for b in payload[:8])
+
+
+def decode_mode_ranges_extra(payload):
+    """MSP_MODE_RANGES_EXTRA (238) -> list of per-slot logic/link records.
+
+    Wire layout: u8 count, then count * (u8 permanent_id, u8 mode_logic,
+    u8 linked_permanent_id).  The records align by slot with MSP_MODE_RANGES.
+    """
+    if not payload:
+        return []
+    count = int(payload[0])
+    out = []
+    for slot in range(count):
+        off = 1 + slot * 3
+        if off + 3 > len(payload):
+            break
+        out.append({
+            "slot": slot,
+            "permanent_id": int(payload[off]),
+            "mode_logic": int(payload[off + 1]),
+            "linked_to": int(payload[off + 2]),
+        })
+    return out
 
 
 def decode_motor(payload, max_motors=8):

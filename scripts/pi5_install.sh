@@ -30,7 +30,7 @@
 #
 # Exit codes: 0 = success, 1 = a required step failed, 2 = bad arguments.
 
-set -u
+set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 SOURCE=$(cd -- "$SCRIPT_DIR/.." && pwd)
@@ -232,6 +232,9 @@ if [ "$DO_VENV" -eq 1 ]; then
     ok "venv already present: $VENV"
   else
     run python3 -m venv --system-site-packages "$VENV"
+    if [ "$IS_ROOT" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+      run chown -R "$BOARD_USER:$BOARD_USER" "$VENV"
+    fi
   fi
   if [ "$DRY_RUN" -eq 0 ] && [ -x "$VENV/bin/pip" ]; then
     quiet "pip upgrade" "$VENV/bin/pip" install --upgrade pip
@@ -294,8 +297,18 @@ if [ "$DO_SERVICE" -eq 1 ]; then
     info "would install $POLKIT_RULE_DST"
   else
     install -d -m 0755 /etc/polkit-1/rules.d
-    install -m 0644 -o root -g root "$POLKIT_RULE_SRC" "$POLKIT_RULE_DST"
-    ok "installed $POLKIT_RULE_DST (polkit reloads rules automatically)"
+    TMP_RULE=$(mktemp)
+    sed "s|__BOARD_USER__|$BOARD_USER|g" "$POLKIT_RULE_SRC" > "$TMP_RULE"
+    install -m 0644 -o root -g root "$TMP_RULE" "$POLKIT_RULE_DST"
+    rm -f "$TMP_RULE"
+    # Membership takes effect on next login; the unit's SupplementaryGroups
+    # covers the current service, but the install user needs the groups too.
+    for group in video dialout render; do
+      if getent group "$group" >/dev/null 2>&1; then
+        usermod -aG "$group" "$BOARD_USER" || true
+      fi
+    done
+    ok "installed $POLKIT_RULE_DST for $BOARD_USER (polkit reloads automatically)"
   fi
 
   if [ "$DO_PERSISTENT_JOURNAL" -eq 1 ]; then

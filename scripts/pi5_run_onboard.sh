@@ -42,4 +42,17 @@ else
 fi
 
 cd -- "$PREFIX"
-exec "$PYTHON" -m onboard.app --config "$CONFIG" "$@"
+# The unit no longer passes --config; still tolerate callers that do, and do
+# not let argparse silently override it with the wrapper default.
+HAS_CONFIG=0
+for arg in "$@"; do
+  if [ "$arg" = "--config" ] || [ "${arg#--config=}" != "$arg" ]; then
+    HAS_CONFIG=1
+    break
+  fi
+done
+if [ "$HAS_CONFIG" -eq 1 ]; then
+  exec "$PYTHON" -m onboard.app "$@"
+else
+  exec "$PYTHON" -m onboard.app --config "$CONFIG" "$@"
+fi

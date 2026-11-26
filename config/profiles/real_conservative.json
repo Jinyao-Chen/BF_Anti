@@ -32,7 +32,11 @@
       "ki_roll": 0.0,
       "ki_e_range_m": 0.0,
       "ki_e_leak_s": 1.5,
-      "lift_ff": true
+      "lift_ff": true,
+      "kp_speed": 2.0,
+      "v_max_mps": 8.0,
+      "vmax_close_range_m": 10.0,
+      "vmax_close_floor_mps": 3.0
     }
   },
   "safety": {
@@ -43,6 +47,12 @@
   "control": {
     "angle_limit_deg": 60.0,
     "rc_rate_limit": 60,
-    "hover_throttle": 1430
+    "hover_throttle": 1430,
+    "att_mode": "rate",
+    "att_rate_gain": 5.0,
+    "rate_max_dps": 200.0,
+    "rate_full_dps": 600.0,
+    "yaw_full_rate_dps": 300.0,
+    "rc_slew_rate_per_s": 1000.0
   }
 }

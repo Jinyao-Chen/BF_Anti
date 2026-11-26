@@ -68,6 +68,7 @@ class FcState:
     rc: tuple[int, ...] = (RC_MID,) * 16
     armed: bool = False
     flight_mode_flags: int = 0
+    extended_flight_mode_flags: bytes = b""
     voltage_v: float = 0.0
     current_a: float = 0.0
     mah: int = 0

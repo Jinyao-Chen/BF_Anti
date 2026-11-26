@@ -42,11 +42,15 @@ def make_mux(source, **kwargs):
         **kwargs,
     )
     mux.RAMP_TIME = 0.001
-    # Observe the boot state (disarmed) so the first manual arm is an edge.
-    saved = source.ch[4]
+    # Observe the boot state (disarmed, mode LOW) so the first manual arm is
+    # an edge and the C7 "must have seen LOW" condition is satisfied.
+    saved_arm = source.ch[4]
+    saved_mode = source.ch[7]
     source.ch[4] = 1000
+    source.ch[7] = 1000
     mux._tick(0.0)
-    source.ch[4] = saved
+    source.ch[4] = saved_arm
+    source.ch[7] = saved_mode
     return mux
 
 

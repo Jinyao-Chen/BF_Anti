@@ -32,10 +32,12 @@ def test_blank_frame_keeps_last_detection_until_max_age():
 
     # A later inference found nothing.  The box must still be available for
     # tracker coasting, but the per-frame list is empty for the HUD.
-    det._publish(np.ones_like(frame), [], None, 10.06, 10.08, 5.0)
+    second_frame = np.ones_like(frame)
+    det._publish(second_frame, [], None, 10.06, 10.08, 5.0)
     assert det.latest(0.4, now=10.10) is first
     assert det.latest_detections(0.4, now=10.10) == []
-    assert det.latest_pair(0.4, now=10.10) == (frame, first)
+    # The OSD gets the new frame with no box, never a frozen old frame+box.
+    assert det.latest_pair(0.4, now=10.10) == (second_frame, None)
 
     # Past max_age the old box is gone.
     assert det.latest(0.4, now=10.60) is None

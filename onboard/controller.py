@@ -50,9 +50,13 @@ class Controller:
         self.guidance = guidance if guidance is not None else cfg.build_guidance()
         self.tracker = tracker if tracker is not None else BboxTracker(
             confirm_frames=getattr(cfg.detector, "confirm_frames", 2),
-            max_coast_frames=getattr(cfg.detector, "max_coast_frames", 4),
+            max_coast_frames=getattr(cfg.detector, "max_coast_frames", 6),
+            max_coast_s=getattr(cfg.detector, "max_coast_s", 0.25),
             gate_px=getattr(cfg.detector, "gate_px", 90.0),
+            gate_frac=getattr(cfg.detector, "gate_frac", 0.15),
+            image_width=int(getattr(cfg.camera, "width", 1280)),
             gate_gain=getattr(cfg.detector, "gate_gain", 3.0),
+            coast_vel_tau_s=getattr(cfg.detector, "coast_vel_tau_s", 0.24),
         )
         self._prev_rpyt: tuple[int, int, int, int] = (
             RC_MID, RC_MID, int(cfg.control.hover_throttle), RC_MID,
@@ -110,13 +114,49 @@ class Controller:
         dy = max(-90.0, min(90.0, float(vel[1]) * age))
         if abs(dx) < 1e-9 and abs(dy) < 1e-9:
             return bbox
-        return (bbox[0] + dx, bbox[1] + dy, bbox[2] + dx, bbox[3] + dy)
+        w_lim = float(self.guidance.intrinsics.width)
+        h_lim = float(self.guidance.intrinsics.height)
+        x1 = max(0.0, min(w_lim - 1.0, float(bbox[0]) + dx))
+        y1 = max(0.0, min(h_lim - 1.0, float(bbox[1]) + dy))
+        x2 = max(x1 + 1.0, min(w_lim, float(bbox[2]) + dx))
+        y2 = max(y1 + 1.0, min(h_lim, float(bbox[3]) + dy))
+        return (x1, y1, x2, y2)
 
-    def _rpyt(self, cmd: PStrikeCommand, state: FcState) -> tuple[int, int, int, int]:
+    def last_seen_age_s(self, now: float) -> float:
+        if self._last_seen <= 0.0:
+            return float("inf")
+        return max(0.0, float(now) - float(self._last_seen))
+
+    def _sync_prev_from_state(self, state: FcState) -> None:
+        """Keep the RC slew base near the FC's current inputs when idle.
+
+        While BOXMSPOVERRIDE is active, MSP_RC echoes the last command, which is
+        exactly the value the next AUTO engagement should slew away from.  In
+        physical manual mode it is the pilot stick.  Either way this avoids a
+        first-tick jump from a stale extreme command.
+        """
+        # Only after a real lock/output: a first acquisition should retain the
+        # hover-anchored slew base, not the pilot's arbitrary stick position.
+        if not (self._had_lock or self._last_out.channels is not None):
+            return
+        rc = getattr(state, "rc", None)
+        if rc is not None and len(rc) >= 4:
+            try:
+                self._prev_rpyt = tuple(int(rc[i]) for i in range(4))
+            except (TypeError, ValueError):
+                pass
+
+    def _rpyt(self, cmd: PStrikeCommand, state: FcState,
+              dt: float = 0.02) -> tuple[int, int, int, int]:
         c = self.cfg.control
         angle_limit = float(c.angle_limit_deg)
         yaw_full = float(c.yaw_full_rate_dps)
         att_mode = str(getattr(c, "att_mode", "angle")).lower()
+        slew_per_s = float(getattr(c, "rc_slew_rate_per_s", 0.0) or 0.0)
+        if slew_per_s > 0.0:
+            rate_limit = max(1, int(round(slew_per_s * max(1e-3, float(dt)))))
+        else:
+            rate_limit = int(c.rc_rate_limit)
 
         if att_mode == "rate":
             # Companion-side attitude P -> body-rate command, then ACRO.
@@ -146,7 +186,7 @@ class Controller:
                 angle_limit_deg=angle_limit,
                 yaw_full_rate_dps=yaw_full,
                 prev=self._prev_rpyt,
-                rate_limit=int(c.rc_rate_limit),
+                rate_limit=rate_limit,
                 roll_sign=float(c.roll_sign),
                 pitch_sign=float(c.pitch_sign),
                 yaw_sign=float(c.yaw_sign),
@@ -161,7 +201,7 @@ class Controller:
                 angle_limit_deg=angle_limit,
                 yaw_full_rate_dps=yaw_full,
                 prev=self._prev_rpyt,
-                rate_limit=int(c.rc_rate_limit),
+                rate_limit=rate_limit,
                 roll_sign=float(c.roll_sign),
                 pitch_sign=float(c.pitch_sign),
                 yaw_sign=float(c.yaw_sign),
@@ -178,6 +218,7 @@ class Controller:
         now: float,
         dt: float,
         state_estimator=None,
+        candidates=None,
     ) -> ControlOutput:
         dt = max(1e-3, min(float(dt), 0.5))
         max_age = float(self.cfg.safety.max_det_age_s)
@@ -194,18 +235,29 @@ class Controller:
         is_new_det = detection is not None and (
             det_t <= 0.0 or det_t > self._last_det_t + 1e-9
         )
+        raw_bbox = None
         if is_new_det:
             if det_t > 0.0:
                 self._last_det_t = det_t
             raw_bbox = detection.bbox
-            track = self.tracker.update(
-                raw_bbox, dt=dt, timestamp=(det_t if det_t > 0.0 else now),
-            )
+            if candidates:
+                track = self.tracker.update_candidates(
+                    candidates, dt=dt, timestamp=(det_t if det_t > 0.0 else now),
+                )
+            else:
+                track = self.tracker.update(
+                    raw_bbox, dt=dt, timestamp=(det_t if det_t > 0.0 else now),
+                )
         else:
             track = self.tracker.update(None, dt=dt, timestamp=now)
 
         if track.fresh:
             self._last_seen = now
+            # When multiple candidates were associated, the tracker's selected
+            # box (not necessarily the detector's highest-confidence box) is
+            # the target used for the inertial LOS.
+            if track.bbox is not None:
+                raw_bbox = track.bbox
         bbox = track.bbox
 
         if bbox is None or not track.confirmed:
@@ -221,13 +273,14 @@ class Controller:
                     )
                     self.last_command = cmd
                     if cmd.phase == PStrikePhase.COAST:
-                        channels = self._rpyt(cmd, state)
+                        channels = self._rpyt(cmd, state, dt=dt)
                         self._prev_rpyt = channels
                         self._last_out = ControlOutput(
                             mode=Mode.TRACK, channels=channels, command=cmd,
                             confirmed=True, reason="coast",
                         )
                         return self._last_out
+            self._sync_prev_from_state(state)
             self._last_out = ControlOutput(
                 mode=Mode.SEARCH, channels=None, command=None,
                 confirmed=False, reason=track.reason,
@@ -266,16 +319,20 @@ class Controller:
             dt,
             fresh=track.fresh,
             u_rate_px_s=(u_rate[0] if u_rate is not None else None),
+            live_rpy_deg=state.rpy_deg,
+            los_bbox_xyxy=(raw_bbox if track.fresh else None),
         )
         self.last_command = cmd
 
         if cmd.hit:
+            self._sync_prev_from_state(state)
             self._last_out = ControlOutput(
                 mode=Mode.HIT, channels=None, command=cmd,
                 confirmed=True, reason="hit",
             )
             return self._last_out
         if not cmd.valid:
+            self._sync_prev_from_state(state)
             self._last_out = ControlOutput(
                 mode=Mode.SEARCH, channels=None, command=cmd,
                 confirmed=True, reason="guidance_invalid",
@@ -287,7 +344,7 @@ class Controller:
             mode = Mode.TERMINAL
         elif cmd.phase == PStrikePhase.HIT:
             mode = Mode.HIT
-        channels = self._rpyt(cmd, state)
+        channels = self._rpyt(cmd, state, dt=dt)
         self._prev_rpyt = channels
         self._last_out = ControlOutput(
             mode=mode, channels=channels, command=cmd,

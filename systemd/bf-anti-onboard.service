@@ -9,20 +9,24 @@ Documentation=file://__INSTALL_DIR__/README.md
 #   __INSTALL_DIR__/logs/run_*/telemetry.csv  (blackbox, always on disk)
 # Run scripts/pi5_log_check.sh after boot to verify both.
 After=local-fs.target
-Wants=network-online.target
-After=network-online.target
 # Do NOT order on dev-fb0.device: systemd can create a device job that never
 # activates for the framebuffer, which blocks the service indefinitely.  The
 # runtime opens fb0/video/FC lazily and retries internally, so no device
 # ordering is required.
-StartLimitIntervalSec=60
-StartLimitBurst=5
+# A crash loop should eventually stop, but 5/60 s also killed the unit
+# after a few early power/FC transients.  The app already retries component
+# startup internally; this is only a last-resort guard.
+StartLimitIntervalSec=120
+StartLimitBurst=10
 
 [Service]
 Type=simple
 # Board account; must be in the video group for /dev/fb0 and /dev/video*.
 User=__BOARD_USER__
 SupplementaryGroups=video dialout
+# Keep the flight runtime alive if the OOM killer fires during a Hailo/OpenCV
+# allocation spike.
+OOMScoreAdjust=-500
 WorkingDirectory=__INSTALL_DIR__
 # Optional overrides: BF_ANTI_HOME / BF_ANTI_VENV / BF_ANTI_CONFIG.
 EnvironmentFile=-/etc/bf-anti/onboard.env
@@ -34,12 +38,15 @@ Environment=OPENCV_VIDEOIO_PRIORITY_V4L2=1
 SyslogIdentifier=bf-anti-onboard
 StandardOutput=journal
 StandardError=journal
-ExecStart=__INSTALL_DIR__/scripts/pi5_run_onboard.sh --config __INSTALL_DIR__/config/onboard.json
+# The wrapper resolves BF_ANTI_CONFIG (EnvironmentFile) or the default
+# config path.  Do not append a second --config here: argparse would silently
+# override the environment with the install-path default.
+ExecStart=__INSTALL_DIR__/scripts/pi5_run_onboard.sh
 
 # Restart only on failure. A clean SIGTERM stop (pilot disarm / maintenance)
 # must stay stopped instead of coming back up on its own.
 Restart=on-failure
-RestartSec=3
+RestartSec=2
 TimeoutStartSec=20
 TimeoutStopSec=20
 KillSignal=SIGTERM

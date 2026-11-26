@@ -284,7 +284,7 @@ ROUTE=$(ip route 2>/dev/null | grep -m1 '^default' || true)
 if [ -n "$ROUTE" ]; then
   ok "default route: $ROUTE"
 else
-  bad "no IPv4 default route"
+  info "no IPv4 default route (normal for offline field flight; not BLOCKED)"
 fi
 if [ -r /etc/resolv.conf ]; then
   DNS=$(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | slash)

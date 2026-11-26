@@ -26,6 +26,7 @@ from onboard.logging_setup import (
     attach_file_handler,
     install_excepthooks,
     install_faulthandler,
+    set_thread_error_hook,
     setup_console_logging,
     shutdown_faulthandler,
 )
@@ -72,6 +73,10 @@ class OnboardApp:
         # Retry cadence for components that fail at boot (fb0/FC not ready).
         self.startup_retry_s = max(0.05, float(startup_retry_s))
         self._start_failures: dict[str, float] = {}
+        self._init_failures: dict[str, float] = {}
+        self._retry_lock = threading.Lock()
+        self._retry_thread: Optional[threading.Thread] = None
+        self._poweroff_on_exit = False
         self._last_reason_event_t = 0.0
         self._last_tick_error_event_t = 0.0
         self._fc_seen_at: Optional[float] = None
@@ -86,6 +91,7 @@ class OnboardApp:
             require_override=cfg.fc.require_override,
             require_engage=cfg.fc.require_engage,
             battery_debounce_s=cfg.safety.battery_debounce_s,
+            require_layout=True,
         )
         self._engaged = False
         self._reset_lock = threading.Lock()
@@ -120,9 +126,10 @@ class OnboardApp:
                 # The camera thread retries opens internally; a constructor
                 # failure means bad config, not a missing device.  Keep the
                 # runtime alive so the FC path still logs.
-                LOG.exception("camera init failed; continuing without camera")
+                LOG.exception("camera init failed; scheduling background retry")
                 self._event("component_init_failed", component="camera", error=repr(exc))
                 self.camera = None
+                self._init_failures["camera"] = time.monotonic()
         if self.detector is None:
             try:
                 from onboard.detector import build_detector
@@ -130,9 +137,10 @@ class OnboardApp:
             except Exception as exc:
                 # Never let a missing HEF/HailoRT hide all FC/RC telemetry.
                 from onboard.detector import NullDetector
-                LOG.exception("detector init failed; falling back to null detector")
+                LOG.exception("detector init failed; falling back to null detector and scheduling retry")
                 self._event("component_init_failed", component="detector", error=repr(exc))
                 self.detector = NullDetector(self.cfg.detector)
+                self._init_failures["detector"] = time.monotonic()
         elif self.camera is not None and hasattr(self.detector, "attach_source"):
             self.detector.attach_source(self.camera)
         if self.video is None and self.cfg.video.enabled:
@@ -140,9 +148,10 @@ class OnboardApp:
                 from onboard.video.pipeline import DisplayPipeline
                 self.video = DisplayPipeline(self.cfg.video)
             except Exception as exc:
-                LOG.exception("video init failed; continuing without OSD")
+                LOG.exception("video init failed; scheduling background retry")
                 self._event("component_init_failed", component="video", error=repr(exc))
                 self.video = None
+                self._init_failures["video"] = time.monotonic()
         if self.mux is None:
             from rc_mux import RCMux
             self.mux = RCMux(
@@ -159,12 +168,47 @@ class OnboardApp:
             )
             self.mux.on_engage = self._on_engage
             self.mux.on_disengage = self._on_disengage
+            self.mux.level_rpyt_fn = self._level_rpyt
         else:
             if hasattr(self.mux, "on_engage"):
                 self.mux.on_engage = self._on_engage
             if hasattr(self.mux, "on_disengage"):
                 self.mux.on_disengage = self._on_disengage
+            if hasattr(self.mux, "level_rpyt_fn"):
+                self.mux.level_rpyt_fn = self._level_rpyt
         self._built = True
+
+    def _level_rpyt(self, safe_throttle: int) -> tuple[int, int, int, int]:
+        """Level-attitude RPYT for ACRO when override is still active.
+
+        Called from the mux thread.  In rate mode, (1500,1500) means zero
+        angular rate and holds a dive; here we close a P loop on live roll/
+        pitch to bring the body level while retaining safe hover throttle.
+        """
+        c = self.cfg.control
+        if str(getattr(c, "att_mode", "rate")).lower() != "rate":
+            # ANGLE self-levels on mid sticks.
+            return (1500, 1500, int(safe_throttle), 1500)
+        try:
+            snap = self.state.snapshot() if self.state is not None else None
+            rpy = getattr(snap, "rpy_deg", (0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0)
+            if not bool(getattr(snap, "armed", False)):
+                return (1500, 1500, 1000, 1500)
+            k_att = float(c.att_rate_gain)
+            rate_max = float(c.rate_max_dps)
+            scale = 500.0 / max(1e-6, float(c.rate_full_dps))
+            p_dps = max(-rate_max, min(rate_max, -k_att * float(rpy[0])))
+            q_dps = max(-rate_max, min(rate_max, -k_att * float(rpy[1])))
+            roll = int(round(1500.0 + float(c.roll_sign) * p_dps * scale))
+            pitch = int(round(1500.0 - float(c.pitch_sign) * q_dps * scale))
+            return (
+                max(1000, min(2000, roll)),
+                max(1000, min(2000, pitch)),
+                int(safe_throttle),
+                1500,
+            )
+        except Exception:
+            return (1500, 1500, int(safe_throttle), 1500)
 
     def _on_engage(self, engaged_throttle: int) -> None:
         # Called from the mux thread.  Do not touch the guidance/tracker state
@@ -407,6 +451,31 @@ class OnboardApp:
             override_on = mode_pwm >= 1300
         else:
             override_on = aux(self.cfg.fc.aux_override) > 1700
+        disc = None
+        try:
+            disc = getattr(self.state, "aux_discovery", None)
+        except Exception:
+            disc = None
+        if disc is not None and getattr(disc, "arm_range", None) is not None:
+            self.mux.arm_range = tuple(disc.arm_range)
+        layout_ok, angle_active = self._fc_layout_state(disc, state)
+        coast_max_s = min(
+            float(getattr(self.controller.guidance, "lost_timeout_s", 0.0) or 0.0),
+            float(self.cfg.safety.terminal_coast_s),
+        )
+        last_range = float("inf")
+        if out.command is not None:
+            try:
+                last_range = float(out.command.range_est_m)
+            except Exception:
+                last_range = float("inf")
+        terminal_range = float(getattr(self.controller.guidance, "terminal_range_m", 3.0))
+        is_terminal_coast = bool(
+            out.confirmed and str(getattr(out, "reason", "")) == "coast"
+            and out.channels is not None
+            and last_range == last_range
+            and last_range <= max(2.0 * terminal_range, terminal_range + 1.0)
+        )
         return SafetyInputs(
             now=now,
             armed=bool(state.armed),
@@ -429,11 +498,64 @@ class OnboardApp:
             estop=self._stop.is_set(),
             fc_seen=fc_seen,
             warmup_grace=warmup_grace,
-            # Verify the FC's actual mode instead of trusting the profile:
-            # att_mode=rate needs ACRO (ANGLE off); angle needs ANGLE on.
-            angle_mode_active=bool(int(getattr(state, "flight_mode_flags", 0) or 0) & 0x1),
+            # NEVER use bit 0: in Betaflight MSP_STATUS, bit 0 is BOXARM.
+            angle_mode_active=angle_active,
             expected_att_mode=str(self.cfg.control.att_mode).lower(),
+            fc_layout_ok=layout_ok,
+            analog_age_s=(
+                (now - float(state.analog_t))
+                if float(getattr(state, "analog_t", 0.0) or 0.0) > 0.0
+                else float("inf")
+            ),
+            coasting=is_terminal_coast,
+            track_lost_age_s=float(
+                self.controller.last_seen_age_s(now)
+                if hasattr(self.controller, "last_seen_age_s")
+                else target_age
+            ),
+            coast_max_s=coast_max_s,
         )
+
+    def _fc_layout_state(self, disc, state) -> tuple[bool, Optional[bool]]:
+        """Return (layout_verified, ANGLE_active) without ever guessing bit 0."""
+        from onboard.fc.mode import BOX_PERMANENT_ID_ANGLE
+        expected = str(self.cfg.control.att_mode).lower()
+        if disc is None:
+            return False, None
+        flags = int(getattr(state, "flight_mode_flags", 0) or 0)
+        ext = bytes(getattr(state, "extended_flight_mode_flags", b"") or b"")
+        angle_active = disc.is_mode_active(flags, BOX_PERMANENT_ID_ANGLE, ext)
+        if angle_active is None and expected == "rate" and disc.bit_index_for(BOX_PERMANENT_ID_ANGLE) is None:
+            # No accelerometer/ANGLE box at all: the FC cannot be in ANGLE.
+            angle_active = False
+
+        rx_ok = disc.rx_map_is_aetr() is True
+        arm_ok = (
+            disc.arm_channel is not None
+            and int(disc.arm_channel) == int(self.cfg.fc.aux_arm)
+            and disc.arm_range is not None
+        )
+        if self.cfg.fc.override_from_mode:
+            override_ok = (
+                disc.override_channel is not None
+                and int(disc.override_channel) == int(self.cfg.fc.aux_engage)
+                and disc.override_range is not None
+                and int(disc.override_range[0]) <= 1300
+                and int(disc.override_range[1]) >= 1700
+            )
+        else:
+            override_ok = (
+                disc.override_channel is not None
+                and int(disc.override_channel) == int(self.cfg.fc.aux_override)
+            )
+        if expected == "angle":
+            angle_ok = (
+                disc.angle_channel is not None
+                and int(disc.angle_channel) == int(self.cfg.fc.aux_angle)
+            )
+        else:
+            angle_ok = True
+        return bool(rx_ok and arm_ok and override_ok and angle_ok), angle_active
 
     def step_once(self, now: Optional[float] = None) -> tuple[ControlOutput, SafetyDecision]:
         self._ensure_built()
@@ -480,8 +602,17 @@ class OnboardApp:
             )
 
         detection = self.detector.latest(self.cfg.safety.max_det_age_s, now)
+        candidates = None
+        if detection is not None and hasattr(self.detector, "latest_detections"):
+            try:
+                candidates = self.detector.latest_detections(
+                    self.cfg.safety.max_det_age_s, now
+                )
+            except Exception:
+                candidates = None
         out = self.controller.step(
-            detection, state, now, self._last_dt, state_estimator=self.state,
+            detection, state, now, self._last_dt,
+            state_estimator=self.state, candidates=candidates,
         )
         decision = self.safety.evaluate(self._safety_inputs(state, detection, out, now))
 
@@ -518,7 +649,13 @@ class OnboardApp:
                 pair_frame, pair_det = self.detector.latest_pair(0.35, now)
                 if pair_frame is not None:
                     frame = pair_frame
-                    frame_t = float(getattr(pair_det, "t", 0.0) or now)
+                    # The pair is the frame that was just inferred, even when
+                    # it contains no detection.  Use its own capture stamp;
+                    # falling back to "now" would hide pipeline latency.
+                    pair_stamp = float(
+                        getattr(self.detector, "last_pair_t", 0.0) or 0.0
+                    )
+                    frame_t = pair_stamp if pair_stamp > 0.0 else now
                     video_det = pair_det
                     used_pair = True
                 else:
@@ -591,25 +728,96 @@ class OnboardApp:
                     return
                 delay = min(10.0, delay * 1.5)
 
+    def _retry_components_worker(self) -> None:
+        """Retry failed components off the 50 Hz loop.
+
+        CameraSource.start() waits up to open_wait_s (1 s), Hailo configure can
+        take seconds, and fb0 open can block.  Doing any of that in the control
+        tick trips loop_overrun and latches FAULT.
+        """
+        while not self._stop.wait(1.0):
+            now = time.monotonic()
+            with self._retry_lock:
+                init_items = list(self._init_failures.items())
+                start_items = list(self._start_failures.items())
+            for name, since in init_items:
+                if now - since < 5.0:
+                    continue
+                try:
+                    if name == "camera":
+                        from onboard.camera import CameraSource
+                        obj = CameraSource(self.cfg.camera)
+                        obj.start()
+                        self.camera = obj
+                        if self.detector is not None and hasattr(self.detector, "attach_source"):
+                            self.detector.attach_source(obj)
+                    elif name == "detector":
+                        from onboard.detector import build_detector
+                        obj = build_detector(self.cfg.detector, source=self.camera)
+                        obj.start()
+                        self.detector = obj
+                    elif name == "video":
+                        from onboard.video.pipeline import DisplayPipeline
+                        obj = DisplayPipeline(self.cfg.video)
+                        obj.start()
+                        self.video = obj
+                    else:
+                        with self._retry_lock:
+                            self._init_failures.pop(name, None)
+                        continue
+                except Exception:
+                    with self._retry_lock:
+                        self._init_failures[name] = time.monotonic()
+                    LOG.exception("retry init/start %s failed", name)
+                else:
+                    if self._stop.is_set():
+                        try:
+                            obj.stop()
+                        except Exception:
+                            pass
+                        continue
+                    with self._retry_lock:
+                        self._init_failures.pop(name, None)
+                    LOG.info("%s initialized after retry", name)
+                    self._event("component_started", component=name)
+            for name, since in start_items:
+                if now - since < 5.0 or name in ("state", "mux"):
+                    continue
+                obj = getattr(self, name, None)
+                if obj is None:
+                    with self._retry_lock:
+                        self._start_failures.pop(name, None)
+                    continue
+                try:
+                    obj.start()
+                except Exception:
+                    with self._retry_lock:
+                        self._start_failures[name] = time.monotonic()
+                    LOG.exception("retry start %s failed", name)
+                else:
+                    if self._stop.is_set():
+                        try:
+                            obj.stop()
+                        except Exception:
+                            pass
+                        continue
+                    with self._retry_lock:
+                        self._start_failures.pop(name, None)
+                    LOG.info("%s started after retry", name)
+                    self._event("component_started", component=name)
+
     def _retry_components(self, now: float) -> None:
-        if not self._start_failures:
-            return
-        for name, since in list(self._start_failures.items()):
-            if now - since < 5.0:
-                continue
-            obj = getattr(self, name, None)
-            if obj is None:
-                self._start_failures.pop(name, None)
-                continue
-            try:
-                obj.start()
-            except Exception:
-                self._start_failures[name] = now
-                LOG.exception("retry start %s failed", name)
-            else:
-                self._start_failures.pop(name, None)
-                LOG.info("%s started after retry", name)
-                self._event("component_started", component=name)
+        """Non-blocking hook: ensure the background retry worker is running."""
+        with self._retry_lock:
+            pending = bool(self._start_failures or self._init_failures)
+            alive = self._retry_thread is not None and self._retry_thread.is_alive()
+            if pending and not alive:
+                self._retry_thread = threading.Thread(
+                    target=self._retry_components_worker,
+                    name="bf-anti-retry",
+                    daemon=True,
+                )
+                self._retry_thread.start()
 
     def run(self) -> int:
         period = 1.0 / max(1.0, float(self.cfg.control.rate_hz))
@@ -657,20 +865,17 @@ class OnboardApp:
 
                 if self._poweroff_requested:
                     self._poweroff_requested = False
-                    try:
-                        ok, detail = self._poweroff()
-                    except Exception as exc:
-                        ok, detail = False, repr(exc)
-                    if ok:
-                        self._event("poweroff_queued", detail=str(detail))
-                        LOG.warning("RC shutdown: system poweroff queued (%s)", detail)
-                        stop_reason = "rc_poweroff"
-                        self._stop.set()
-                        break
-                    LOG.error("RC shutdown: system poweroff failed: %s", detail)
-                    self._event("poweroff_failed", error=str(detail))
-                    # Keep the service alive; retry while the switch is held.
-                    self.shutdown_guard.retry_after(now)
+                    # Do NOT queue systemctl poweroff here.  systemd starts
+                    # shutdown immediately and SIGTERM can truncate the blackbox
+                    # before telemetry.close()/fsync.  Stop the loop, clean up in
+                    # stop(), then request poweroff as the last action.
+                    self._poweroff_on_exit = True
+                    stop_reason = "rc_poweroff"
+                    self._stop_reason = "rc_poweroff"
+                    self._event("poweroff_requested_after_flush")
+                    LOG.warning("RC shutdown: stopping components and flushing blackbox first")
+                    self._stop.set()
+                    break
 
                 next_t += period
                 sleep_s = next_t - time.monotonic()
@@ -725,6 +930,31 @@ class OnboardApp:
                 self.telemetry.close(str(reason))
             except Exception:
                 LOG.exception("closing blackbox failed")
+        with self._retry_lock:
+            retry_thread, self._retry_thread = self._retry_thread, None
+        if retry_thread is not None and retry_thread is not threading.current_thread():
+            retry_thread.join(timeout=1.5)
+        if self._poweroff_on_exit:
+            self._poweroff_on_exit = False
+            try:
+                os.sync()
+            except Exception:
+                pass
+            last_detail = ""
+            for attempt in range(3):
+                try:
+                    ok, detail = self._poweroff()
+                except Exception as exc:
+                    ok, detail = False, repr(exc)
+                last_detail = str(detail)
+                if ok:
+                    self._event("poweroff_queued", detail=last_detail)
+                    LOG.warning("RC shutdown: system poweroff queued (%s)", last_detail)
+                    return
+                LOG.error("RC shutdown attempt %d failed: %s", attempt + 1, last_detail)
+                time.sleep(1.0)
+            self._event("poweroff_failed", error=last_detail)
+            LOG.error("RC shutdown: all poweroff attempts failed: %s", last_detail)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -766,6 +996,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     level = args.log_level or cfg.telemetry.level
     setup_console_logging(level)
+    if float(cfg.safety.min_battery_v) <= 0.0:
+        LOG.warning(
+            "battery low-voltage protection is DISABLED (safety.min_battery_v=0); "
+            "set a measured per-pack threshold before flight"
+        )
+    if not bool(getattr(cfg.camera, "strict_size", True)):
+        LOG.warning(
+            "camera.strict_size=false: a driver-selected resolution may not match "
+            "the static intrinsics"
+        )
+    if not bool(getattr(cfg.fc, "enable_aux_discovery", True)):
+        LOG.warning(
+            "FC AUX discovery is disabled; the safety gate will keep AUTO closed "
+            "because BOXIDS/RX_MAP cannot be verified"
+        )
 
     log_dir = os.path.abspath(os.path.expanduser(args.log_dir or cfg.log_dir))
     tlog: Optional[TelemetryLog] = None
@@ -775,6 +1020,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             hz=cfg.telemetry.hz,
             max_file_bytes=int(cfg.telemetry.max_file_mb * 1024 * 1024),
             max_runs=cfg.telemetry.max_runs,
+            max_segments=cfg.telemetry.max_segments,
             flush_interval_s=cfg.telemetry.flush_interval_s,
             fsync_interval_s=cfg.telemetry.fsync_interval_s,
         )
@@ -805,8 +1051,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         cfg.detector.backend, log_dir,
     )
     app = OnboardApp(cfg, telemetry=tlog)
-    signal.signal(signal.SIGINT, lambda *_: app.request_stop("sigint"))
-    signal.signal(signal.SIGTERM, lambda *_: app.request_stop("sigterm"))
+
+    def _on_thread_crash(thread_name, exc) -> None:
+        try:
+            app._event("thread_crash", thread=str(thread_name), error=repr(exc))
+        except Exception:
+            pass
+        app.request_stop("thread_exception")
+
+    set_thread_error_hook(_on_thread_crash)
+
+    def _on_signal(reason: str) -> None:
+        # A signal arriving during RC shutdown cleanup must not overwrite the
+        # blackbox stop reason.
+        if app._stop_reason != "rc_poweroff":
+            app.request_stop(reason)
+
+    signal.signal(signal.SIGINT, lambda *_: _on_signal("sigint"))
+    signal.signal(signal.SIGTERM, lambda *_: _on_signal("sigterm"))
     try:
         return app.run()
     except Exception:
@@ -816,6 +1078,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         shutdown_faulthandler()
         if tlog is not None:
             tlog.close("process_exit")
+        # runtime.log must be flushed before systemd's journal/file handles go
+        # away; otherwise the last line of a crash/flight is lost.
+        try:
+            logging.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

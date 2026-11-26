@@ -26,6 +26,8 @@ from msp import (
     decode_boxids,
     decode_boxnames,
     decode_mode_ranges,
+    decode_mode_ranges_extra,
+    decode_rx_map,
 )
 
 BOX_PERMANENT_ID_ARM = 0
@@ -75,7 +77,10 @@ class AuxDiscovery:
     """Resolved mode-switch layout.  Channel values are full-array indices."""
 
     boxes: list = field(default_factory=list)            # [(permanent_id, name)]
+    bit_index_by_pid: dict = field(default_factory=dict) # {permanent_id: BOXIDS index}
     mode_ranges: list = field(default_factory=list)      # decoded + permanent id
+    mode_ranges_extra: list = field(default_factory=list) # MSP_MODE_RANGES_EXTRA (238)
+    rx_map: Optional[tuple] = None                       # MSP_RX_MAP (64), AETR=(0,1,3,2)
     override_channel: Optional[int] = None
     override_range: Optional[tuple] = None
     arm_channel: Optional[int] = None
@@ -91,10 +96,48 @@ class AuxDiscovery:
                 return name
         return None
 
+    def bit_index_for(self, permanent_id):
+        """Return the MSP_STATUS flightModeFlags bit for a permanent ID.
+
+        Betaflight's packFlightModeFlags() numbers bits by the *position of
+        the permanent ID in the active MSP_BOXIDS list*, not by the permanent
+        ID itself.  BOXIDS is ordered the same way, so the list index is the
+        bit index.  Bit 0 is normally ARM, never ANGLE.
+        """
+        pid = int(permanent_id)
+        if pid in self.bit_index_by_pid:
+            return int(self.bit_index_by_pid[pid])
+        for index, (box_pid, _name) in enumerate(self.boxes):
+            if int(box_pid) == pid:
+                return index
+        return None
+
+    def is_mode_active(self, flight_mode_flags, permanent_id,
+                       extended_flags: bytes = b"") -> Optional[bool]:
+        """Evaluate one mode bit, or None when the box is unknown."""
+        bit = self.bit_index_for(permanent_id)
+        if bit is None:
+            return None
+        if bit < 32:
+            return bool(int(flight_mode_flags) & (1 << bit))
+        byte_index = (bit - 32) // 8
+        bit_offset = (bit - 32) % 8
+        if byte_index < len(extended_flags):
+            return bool(extended_flags[byte_index] & (1 << bit_offset))
+        return None
+
+    def rx_map_is_aetr(self) -> Optional[bool]:
+        if self.rx_map is None:
+            return None
+        return tuple(self.rx_map[:4]) == (0, 1, 3, 2)
+
     def to_dict(self):
         return {
             "boxes": [{"permanent_id": pid, "name": name} for pid, name in self.boxes],
+            "bit_index_by_pid": {str(k): int(v) for k, v in self.bit_index_by_pid.items()},
             "mode_ranges": list(self.mode_ranges),
+            "mode_ranges_extra": list(self.mode_ranges_extra),
+            "rx_map": list(self.rx_map) if self.rx_map is not None else None,
             "channels": {
                 "arm": self.arm_channel,
                 "angle": self.angle_channel,
@@ -150,38 +193,51 @@ def _record_ranges(discovery, payloads):
     return resolved
 
 
-def discover_aux(link, cfg=None) -> AuxDiscovery:
-    """Read box names/IDs/mode ranges and resolve the real AUX channels."""
+def resolve_aux_layout(ids, names=(), range_payloads=(), rx_map=None,
+                       extra_payload=None, cfg=None) -> AuxDiscovery:
+    """Build an AuxDiscovery from already-fetched MSP replies (pure).
+
+    The runtime fetches these replies across several poll ticks to avoid
+    blocking the telemetry thread; discovery and offline tools can also fetch
+    them synchronously and call this function.  ``ids`` must preserve the
+    MSP_BOXIDS page order because that order defines the status-flag bits.
+    """
     discovery = AuxDiscovery()
-
-    id_pages = _collect_pages(link, MSP_CMD.BOXIDS)
-    ids = []
-    for payload in id_pages:
-        ids.extend(decode_boxids(payload))
-
-    names = []
-    for page in range(len(id_pages) or 1):
-        payload = _query_box_page(link, MSP_CMD.BOXNAMES, page)
-        if not payload:
-            break
-        names.extend(decode_boxnames(payload))
-
+    ids = [int(pid) for pid in ids]
+    # BOXNAMES is optional for bit mapping; fill blanks so lengths stay aligned.
+    names = list(names or ())
     if len(names) != len(ids):
         discovery.warnings.append(
             "BOXNAMES/BOXIDS length mismatch: %d names vs %d ids" % (len(names), len(ids))
         )
     discovery.boxes = [(pid, names[i] if i < len(names) else "")
                        for i, pid in enumerate(ids)]
+    discovery.bit_index_by_pid = {pid: index for index, pid in enumerate(ids)}
 
-    range_pages = []
-    payload = _query(link, MSP_CMD.MODE_RANGES, payload=b"", is_v2=False)
-    if payload is None:
-        payload = _query(link, MSP_CMD.MODE_RANGES, payload=b"", is_v2=True)
-    if payload is None:
-        discovery.warnings.append("MSP_MODE_RANGES unavailable; AUX channels unresolved")
+    if rx_map is not None:
+        discovery.rx_map = tuple(int(v) for v in rx_map)
+        if not discovery.rx_map_is_aetr():
+            discovery.warnings.append(
+                "FC MSP_RX_MAP %s is not AETR1234 (0,1,3,2)"
+                % (discovery.rx_map[:4],)
+            )
     else:
-        range_pages.append(payload)
-    _record_ranges(discovery, range_pages)
+        discovery.warnings.append("MSP_RX_MAP unavailable; cannot verify AETR1234")
+
+    _record_ranges(discovery, range_payloads)
+
+    if extra_payload:
+        discovery.mode_ranges_extra = decode_mode_ranges_extra(extra_payload)
+        for entry in discovery.mode_ranges_extra:
+            if entry["permanent_id"] == 0 and entry["mode_logic"] == 0 and entry["linked_to"] == 0:
+                continue
+            if entry["mode_logic"] != 0 or entry["linked_to"] != 0:
+                discovery.warnings.append(
+                    "mode slot %d (pid=%d) uses logic=%d linked_to=%d; "
+                    "verify the FC actually applies it"
+                    % (entry["slot"], entry["permanent_id"],
+                       entry["mode_logic"], entry["linked_to"])
+                )
 
     name_by_pid = {pid: name for pid, name in discovery.boxes}
     if BOX_PERMANENT_ID_MSPOVERRIDE not in name_by_pid:
@@ -230,4 +286,41 @@ def discover_aux(link, cfg=None) -> AuxDiscovery:
         discovery.warnings.append(
             "engage channel unknown (no FcConfig supplied; it is a pilot switch, not an FC box)"
         )
+    return discovery
+
+
+def discover_aux(link, cfg=None) -> AuxDiscovery:
+    """Read box names/IDs/mode ranges and resolve the real AUX channels."""
+    id_pages = _collect_pages(link, MSP_CMD.BOXIDS)
+    ids = []
+    for payload in id_pages:
+        ids.extend(decode_boxids(payload))
+
+    names = []
+    for page in range(len(id_pages) or 1):
+        payload = _query_box_page(link, MSP_CMD.BOXNAMES, page)
+        if not payload:
+            break
+        names.extend(decode_boxnames(payload))
+
+    range_pages = []
+    payload = _query(link, MSP_CMD.MODE_RANGES, payload=b"", is_v2=False)
+    if payload is None:
+        payload = _query(link, MSP_CMD.MODE_RANGES, payload=b"", is_v2=True)
+    if payload is not None:
+        range_pages.append(payload)
+
+    extra_payload = _query(link, MSP_CMD.MODE_RANGES_EXTRA, payload=b"", is_v2=False)
+    if extra_payload is None:
+        extra_payload = _query(link, MSP_CMD.MODE_RANGES_EXTRA, payload=b"", is_v2=True)
+
+    rx_map_payload = _query(link, MSP_CMD.RX_MAP, payload=b"", is_v2=False)
+    rx_map = decode_rx_map(rx_map_payload) if rx_map_payload else None
+
+    discovery = resolve_aux_layout(
+        ids, names, range_pages, rx_map=rx_map,
+        extra_payload=extra_payload, cfg=cfg,
+    )
+    if not range_pages:
+        discovery.warnings.append("MSP_MODE_RANGES unavailable; AUX channels unresolved")
     return discovery

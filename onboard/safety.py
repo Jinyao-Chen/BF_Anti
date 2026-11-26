@@ -46,6 +46,17 @@ class SafetyInputs:
     # Optional FC actual flight-mode check to prevent ANGLE vs ACRO mismatch.
     angle_mode_active: bool | None = None
     expected_att_mode: str | None = None
+    # Verification of the FC's physical switch layout (BOXIDS/RX_MAP).  The
+    # app sets require_layout on the supervisor; standalone callers/tests keep
+    # the old behaviour by leaving this True.
+    fc_layout_ok: bool = True
+    # Battery voltage freshness.  0.0 is "never received", not "0 V".
+    analog_age_s: float = float("inf")
+    # Terminal COAST: out.confirmed stays true while guidance coasts.  Allow a
+    # short, explicitly bounded loss window independent of max_det_age_s.
+    coasting: bool = False
+    track_lost_age_s: float = float("inf")
+    coast_max_s: float = 0.0
 
 
 @dataclass
@@ -62,10 +73,12 @@ class SafetySupervisor:
         require_override: bool = True,
         require_engage: bool = True,
         battery_debounce_s: float = 0.0,
+        require_layout: bool = False,
     ) -> None:
         self.cfg = cfg
         self.require_override = bool(require_override)
         self.require_engage = bool(require_engage)
+        self.require_layout = bool(require_layout)
         self.battery_debounce_s = max(0.0, float(battery_debounce_s))
         self._latched: str | None = None
         self._low_batt_since: float | None = None
@@ -96,7 +109,11 @@ class SafetySupervisor:
             return self._deny("fc_warming_up")
 
         def stale(reason: str) -> SafetyDecision:
-            return self._deny(reason) if inp.warmup_grace else self._critical(reason)
+            # A bench/boot transient while disarmed is not a flight fault and
+            # must never latch a FAULT that survives the next arming.
+            if inp.warmup_grace or not inp.armed:
+                return self._deny(reason)
+            return self._critical(reason)
 
         if inp.link_age_s > c.max_status_age_s:
             return stale("fc_link_stale")
@@ -110,16 +127,22 @@ class SafetySupervisor:
             return stale("status_stale")
         if inp.loop_dt_s > c.max_loop_dt_s:
             return stale("loop_overrun")
-        if c.min_battery_v > 0.0 and 0.0 < inp.battery_v < c.min_battery_v:
-            if self.battery_debounce_s <= 0.0:
-                return self._critical("battery_low")
-            if self._low_batt_since is None:
-                self._low_batt_since = float(inp.now)
-            if (float(inp.now) - self._low_batt_since) >= self.battery_debounce_s:
-                return self._critical("battery_low")
-            # Debounce is not permission to fly: keep auto denied while the
-            # pack is below threshold, but do not latch yet.
-            return self._deny("battery_low_pending")
+        if c.min_battery_v > 0.0:
+            max_age = float(getattr(c, "max_analog_age_s", 2.0))
+            if inp.battery_v <= 0.0 or inp.analog_age_s > max_age:
+                return self._deny("battery_telemetry_stale")
+            if inp.battery_v < c.min_battery_v:
+                # Low pack on the bench is not a fault to latch; airborne it
+                # is.  Debounce is never permission to fly.
+                if not inp.armed:
+                    return self._deny("battery_low")
+                if self.battery_debounce_s <= 0.0:
+                    return self._critical("battery_low")
+                if self._low_batt_since is None:
+                    self._low_batt_since = float(inp.now)
+                if (float(inp.now) - self._low_batt_since) >= self.battery_debounce_s:
+                    return self._critical("battery_low")
+                return self._deny("battery_low_pending")
         else:
             self._low_batt_since = None
 
@@ -128,8 +151,12 @@ class SafetySupervisor:
 
         if not inp.armed:
             return self._deny("disarmed")
-        if inp.expected_att_mode is not None and inp.angle_mode_active is not None:
+        if self.require_layout and inp.fc_layout_ok is not True:
+            return self._deny("fc_layout_unknown")
+        if inp.expected_att_mode is not None:
             exp = str(inp.expected_att_mode).lower()
+            if inp.angle_mode_active is None:
+                return self._deny("att_mode_unknown")
             if (exp == "angle" and not inp.angle_mode_active) or (
                 exp == "rate" and inp.angle_mode_active
             ):
@@ -142,7 +169,11 @@ class SafetySupervisor:
             return self._deny("detector_unhealthy")
         if not inp.target_confirmed:
             return self._deny("target_unconfirmed")
-        if inp.target_age_s > c.target_lost_s:
+        if inp.coasting:
+            coast_limit = float(inp.coast_max_s) if inp.coast_max_s > 0.0 else float(c.target_lost_s)
+            if inp.track_lost_age_s > coast_limit:
+                return self._deny("target_stale")
+        elif inp.target_age_s > c.target_lost_s:
             return self._deny("target_stale")
         if inp.altitude_m < c.min_altitude_m:
             return self._deny("altitude_low")

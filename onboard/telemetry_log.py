@@ -86,6 +86,41 @@ MANIFEST_NAME = "startup.json"
 TELEMETRY_NAME = "telemetry.csv"
 EVENTS_NAME = "events.jsonl"
 RUN_PREFIX = "run_"
+
+
+def _fsync_dir(path: str) -> None:
+    """Best-effort fsync of a directory after an atomic rename."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _atomic_json(path: str, payload: dict) -> None:
+    """Write JSON via a fsynced temp file + atomic replace.
+
+    flush() alone only reaches the page cache; a power cut right after login
+    can leave a zero-byte startup.json.  fsync the file and its directory.
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    _fsync_dir(os.path.dirname(path) or ".")
+
+
 LATEST_LINK = "latest"
 
 _STOP = object()
@@ -185,6 +220,7 @@ class TelemetryLog:
         hz: float = 10.0,
         max_file_bytes: int = 32 * 1024 * 1024,
         max_runs: int = 20,
+        max_segments: int = 20,
         flush_interval_s: float = 1.0,
         fsync_interval_s: float = 5.0,
         queue_size: int = 4096,
@@ -196,8 +232,13 @@ class TelemetryLog:
         self.hz = max(0.0, float(hz))
         self.max_file_bytes = max(64 * 1024, int(max_file_bytes))
         self.max_runs = max(0, int(max_runs))
+        self.max_segments = max(1, int(max_segments))
         self.flush_interval_s = max(0.05, float(flush_interval_s))
-        self.fsync_interval_s = max(0.0, float(fsync_interval_s))
+        # <=0 disables periodic fsync (the final close still syncs).  The old
+        # clamp-to-zero made 0 mean "fsync every row", i.e. 100 fsync/s at
+        # 50 Hz, and made the intended disable branch unreachable.
+        self.fsync_interval_s = float(fsync_interval_s)
+        self._run_seq = 0
         self.queue_size = max(64, int(queue_size))
         self._clock = clock
         self._mono = monotonic
@@ -446,11 +487,11 @@ class TelemetryLog:
             if now - last_flush >= self.flush_interval_s:
                 self._flush()
                 last_flush = now
-            if self.fsync_interval_s >= 0.0 and now - last_fsync >= self.fsync_interval_s:
+            if self.fsync_interval_s > 0.0 and now - last_fsync >= self.fsync_interval_s:
                 self._fsync()
                 last_fsync = now
         self._flush()
-        self._fsync()
+        self._fsync(force=True)
 
     def _finish_run(self) -> None:
         """Write the final run_stop event exactly once (writer thread)."""
@@ -484,8 +525,8 @@ class TelemetryLog:
                 self._fail_io(exc)
                 return
 
-    def _fsync(self) -> None:
-        if self.fsync_interval_s < 0.0:
+    def _fsync(self, force: bool = False) -> None:
+        if not force and self.fsync_interval_s <= 0.0:
             return
         for handle in (self._csv_file, self._events_file):
             if handle is None:
@@ -533,6 +574,15 @@ class TelemetryLog:
             self.segment += 1
             rotated = os.path.join(self.run_dir or "", f"telemetry.{self.segment:03d}.csv")
             os.replace(self.telemetry_path, rotated)
+            # Keep a bounded number of archived segments; otherwise a long
+            # ground test at 32 MB/segment can fill the SD card.
+            oldest = self.segment - self.max_segments
+            for seg in range(1, oldest + 1):
+                stale = os.path.join(self.run_dir or "", f"telemetry.{seg:03d}.csv")
+                try:
+                    os.unlink(stale)
+                except OSError:
+                    pass
             self._csv_file = open(
                 self.telemetry_path, "w", newline="", encoding="utf-8", buffering=1
             )
@@ -543,8 +593,30 @@ class TelemetryLog:
             self._fail_io(exc)
 
     # -- run directory helpers --------------------------------------------
+    def _next_run_seq(self) -> int:
+        """Persist a monotonic run counter independent of the wall clock."""
+        path = os.path.join(self.base_dir, ".run_seq")
+        try:
+            try:
+                with open(path, "r", encoding="ascii") as fh:
+                    seq = int((fh.read() or "0").strip() or 0)
+            except (OSError, ValueError):
+                seq = 0
+            seq += 1
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="ascii") as fh:
+                fh.write(str(seq) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+            _fsync_dir(self.base_dir)
+            return seq
+        except OSError:
+            return 0
+
     def _new_run_dir(self) -> str:
         now = float(self._clock())
+        self._run_seq = self._next_run_seq()
         stamp = datetime.fromtimestamp(now).strftime("%Y%m%d_%H%M%S")
         if now < 1_600_000_000.0:
             # No RTC/NTP yet: use boot id + uptime so runs stay distinguishable.
@@ -584,7 +656,6 @@ class TelemetryLog:
                 for entry in os.listdir(self.base_dir)
                 if entry.startswith(RUN_PREFIX)
                 and os.path.isdir(os.path.join(self.base_dir, entry))
-                and os.path.isfile(os.path.join(self.base_dir, entry, MANIFEST_NAME))
             ]
         except OSError:
             return
@@ -594,11 +665,20 @@ class TelemetryLog:
             except OSError:
                 return 0.0
 
-        # Sort by creation time, not name: an unsynced clock produces
-        # run_unsynced_* names that would otherwise sort after dated runs.
-        # mtime is the primary key; the run name is a deterministic tie-breaker
-        # when several directories are created inside the same filesystem tick.
-        entries.sort(key=lambda name: (_mtime(name), name))
+        def _seq(name: str) -> int:
+            # Persisted monotonic sequence beats a wall clock that can jump
+            # backwards on an offline Pi.  Legacy/orphan runs fall back to 0
+            # and mtime.
+            path = os.path.join(self.base_dir, name, MANIFEST_NAME)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    return int(json.load(fh).get("run_seq", 0) or 0)
+            except (OSError, ValueError, TypeError):
+                return 0
+
+        # Sequence is primary; mtime/name are deterministic tie-breakers for
+        # legacy runs and same-tick creations.
+        entries.sort(key=lambda name: (_seq(name), _mtime(name), name))
         # Keep max_runs-1 so the new run does not push the count over.
         while len(entries) >= self.max_runs:
             victim = entries.pop(0)
@@ -620,15 +700,12 @@ class TelemetryLog:
                 "telemetry_file": TELEMETRY_NAME,
                 "events_file": EVENTS_NAME,
                 "columns": list(CSV_COLUMNS),
+                "run_seq": int(self._run_seq),
             }
         )
         path = os.path.join(self.run_dir, MANIFEST_NAME)
-        tmp = path + ".tmp"
         try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
-                fh.write("\n")
-            os.replace(tmp, path)
+            _atomic_json(path, payload)
         except OSError as exc:
             self._fail_io(exc)
 
@@ -651,12 +728,8 @@ class TelemetryLog:
                 "io_error": self._io_error,
             }
         )
-        tmp = os.path.join(self.run_dir, MANIFEST_NAME + ".tmp")
         try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False, indent=2, default=str)
-                fh.write("\n")
-            os.replace(tmp, os.path.join(self.run_dir, MANIFEST_NAME))
+            _atomic_json(os.path.join(self.run_dir, MANIFEST_NAME), payload)
         except OSError:
             pass
 

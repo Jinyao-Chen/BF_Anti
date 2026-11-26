@@ -262,6 +262,14 @@ class DisplayPipeline:
         # pair queued while the display thread was busy is recognised as
         # stale instead of being rendered late.  OSD still gets the control
         # tick (stamp) for its end-to-end detection-age readout.
+        #
+        # With no camera frame (unplugged/starting) the capture stamp is 0;
+        # using it would drop every HUD frame.  Render the black canvas with
+        # live telemetry instead, which is exactly what the pilot needs to see
+        # when the camera is the failed component.
+        if frame is None or float(frame_stamp) <= 0.0:
+            frame = None
+            frame_stamp = float(stamp)
         if (now - float(frame_stamp)) > stale_s:
             with self._lock:
                 self._stale += 1
@@ -306,6 +314,12 @@ class DisplayPipeline:
             with self._lock:
                 self._errors += 1
                 self._sink_open = False
+            # Do not leave a half-dead mmap/fd around: FBDevSink.open()
+            # short-circuits on is_open and would keep writing the stale map.
+            try:
+                sink.close()
+            except Exception:
+                pass
             self._log.exception("framebuffer write failed")
             return
         finished = self._clock()
@@ -313,6 +327,10 @@ class DisplayPipeline:
             with self._lock:
                 self._errors += 1
                 self._sink_open = False
+            try:
+                sink.close()
+            except Exception:
+                pass
             return
         latency_ms = max(0.0, (finished - started) * 1000.0)
         with self._lock:

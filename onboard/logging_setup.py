@@ -29,6 +29,13 @@ _DATEFMT = "%Y-%m-%d %H:%M:%S"
 # Keep the crash file object alive for the whole process; faulthandler writes
 # through the descriptor, not through Python's logging machinery.
 _FAULT_FILE: Optional[IO[str]] = None
+_THREAD_ERROR_HOOK = None
+
+
+def set_thread_error_hook(callback) -> None:
+    """Register a best-effort callback(thread_name, exc) for worker crashes."""
+    global _THREAD_ERROR_HOOK
+    _THREAD_ERROR_HOOK = callback
 
 
 def level_from_name(name: str, default: int = logging.INFO) -> int:
@@ -109,6 +116,12 @@ def install_excepthooks() -> None:
             "uncaught exception in thread %s", thread_name,
             exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
         )
+        hook = _THREAD_ERROR_HOOK
+        if hook is not None:
+            try:
+                hook(thread_name, args.exc_value)
+            except Exception:
+                pass
 
     threading.excepthook = _thread_excepthook
 

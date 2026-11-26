@@ -124,7 +124,8 @@ def test_rate_mode_maps_attitude_error_to_angular_rate():
     cfg = make_cfg()
     cfg = replace(cfg, control=replace(cfg.control, att_mode="rate",
                                         att_rate_gain=6.0, rate_max_dps=250.0,
-                                        rate_full_dps=600.0))
+                                        rate_full_dps=600.0,
+                                        rc_slew_rate_per_s=0.0))
     c = Controller(cfg)
     cmd = PStrikeCommand(roll_cmd_deg=0.0, pitch_cmd_deg=10.0,
                          yaw_rate_dps=0.0, throttle_pwm=1500.0)
@@ -138,7 +139,8 @@ def test_rate_mode_maps_attitude_error_to_angular_rate():
 def test_angle_mode_still_uses_angle_scaling():
     cfg = make_cfg()
     cfg = replace(cfg, control=replace(cfg.control, att_mode="angle",
-                                        angle_limit_deg=60.0, rc_rate_limit=1000))
+                                        angle_limit_deg=60.0, rc_rate_limit=1000,
+                                        rc_slew_rate_per_s=0.0))
     c = Controller(cfg)
     cmd = PStrikeCommand(roll_cmd_deg=0.0, pitch_cmd_deg=10.0,
                          yaw_rate_dps=0.0, throttle_pwm=1500.0)
