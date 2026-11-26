@@ -10,6 +10,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXAMPLE = os.path.join(ROOT, "config", "onboard.example.json")
 
 
+def _write_test_config(tmp_path, raw, name="test.json"):
+    # A temp config has no profiles/ directory; clear the profile reference so
+    # this test exercises the value under test, not the aircraft profile.
+    raw = dict(raw)
+    raw["profile"] = ""
+    path = tmp_path / name
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
+
+
 def test_example_config_loads_and_profile_overlays():
     cfg = load_config(EXAMPLE)
     assert cfg.profile == "real_pn8_rate"
@@ -37,8 +47,7 @@ def test_build_guidance_uses_measured_camera_geometry():
 def test_rotation_swaps_guidance_image_size(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
     raw["camera"]["rotate_deg"] = 90
-    p = tmp_path / "rotated.json"
-    p.write_text(json.dumps(raw), encoding="utf-8")
+    p = _write_test_config(tmp_path, raw, "rotated.json")
     cfg = load_config(str(p))
     g = cfg.build_guidance()
     assert (g.intrinsics.width, g.intrinsics.height) == (
@@ -52,8 +61,7 @@ def test_duplicate_aux_channels_rejected(tmp_path):
     # Legacy mode: separate OVERRIDE and MODE switches must be distinct.
     raw["fc"]["override_from_mode"] = False
     raw["fc"]["aux_engage"] = raw["fc"]["aux_override"]
-    p = tmp_path / "bad.json"
-    p.write_text(json.dumps(raw), encoding="utf-8")
+    p = _write_test_config(tmp_path, raw, "bad.json")
     with pytest.raises(ValueError, match="distinct"):
         load_config(str(p))
 
@@ -61,8 +69,7 @@ def test_duplicate_aux_channels_rejected(tmp_path):
 def test_mode_and_arm_channels_must_still_differ(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
     raw["fc"]["aux_arm"] = raw["fc"]["aux_engage"]
-    p = tmp_path / "bad.json"
-    p.write_text(json.dumps(raw), encoding="utf-8")
+    p = _write_test_config(tmp_path, raw, "bad.json")
     with pytest.raises(ValueError, match="distinct"):
         load_config(str(p))
 
@@ -70,8 +77,7 @@ def test_mode_and_arm_channels_must_still_differ(tmp_path):
 def test_bad_throttle_range_rejected(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
     raw["control"]["hover_throttle"] = 999
-    p = tmp_path / "bad.json"
-    p.write_text(json.dumps(raw), encoding="utf-8")
+    p = _write_test_config(tmp_path, raw, "bad.json")
     with pytest.raises(ValueError, match="hover_throttle"):
         load_config(str(p))
 
@@ -97,7 +103,7 @@ def test_example_config_enables_the_blackbox():
     assert cfg.telemetry.enabled
     assert cfg.telemetry.hz == 10.0
     assert cfg.telemetry.max_runs == 20
-    assert cfg.log_dir == "/home/pi5/bf_anti_logs"
+    assert cfg.log_dir == "logs"
     # log_dir must survive the profile overlay (it is not a profile key).
     assert cfg.to_dict()["telemetry"]["hz"] == 10.0
 
@@ -105,8 +111,7 @@ def test_example_config_enables_the_blackbox():
 def test_bad_telemetry_hz_rejected(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
     raw["telemetry"]["hz"] = 500
-    p = tmp_path / "bad.json"
-    p.write_text(json.dumps(raw), encoding="utf-8")
+    p = _write_test_config(tmp_path, raw, "bad.json")
     with pytest.raises(ValueError, match="telemetry.hz"):
         load_config(str(p))
 
@@ -114,8 +119,7 @@ def test_bad_telemetry_hz_rejected(tmp_path):
 def test_power_channel_must_not_collide_with_flight_aux(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
     raw["power"]["aux_channel"] = raw["fc"]["aux_engage"]
-    p = tmp_path / "bad.json"
-    p.write_text(json.dumps(raw), encoding="utf-8")
+    p = _write_test_config(tmp_path, raw, "bad.json")
     with pytest.raises(ValueError, match="power.aux_channel"):
         load_config(str(p))
 
@@ -123,8 +127,7 @@ def test_power_channel_must_not_collide_with_flight_aux(tmp_path):
 def test_power_channel_range_rejected(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
     raw["power"]["aux_channel"] = 16
-    p = tmp_path / "bad.json"
-    p.write_text(json.dumps(raw), encoding="utf-8")
+    p = _write_test_config(tmp_path, raw, "bad.json")
     with pytest.raises(ValueError, match="power.aux_channel"):
         load_config(str(p))
 
@@ -132,8 +135,7 @@ def test_power_channel_range_rejected(tmp_path):
 def test_bad_telemetry_retention_rejected(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
     raw["telemetry"]["max_runs"] = 0
-    p = tmp_path / "bad.json"
-    p.write_text(json.dumps(raw), encoding="utf-8")
+    p = _write_test_config(tmp_path, raw, "bad.json")
     with pytest.raises(ValueError, match="max_runs"):
         load_config(str(p))
 
@@ -141,8 +143,7 @@ def test_bad_telemetry_retention_rejected(tmp_path):
 def test_build_guidance_wires_optional_distortion(tmp_path):
     raw = json.load(open(EXAMPLE, encoding="utf-8"))
     raw["camera"]["dist_coeffs"] = [-0.25, 0.05, 0.001, -0.002, 0.0]
-    p = tmp_path / "dist.json"
-    p.write_text(json.dumps(raw), encoding="utf-8")
+    p = _write_test_config(tmp_path, raw, "dist.json")
     cfg = load_config(str(p))
     g = cfg.build_guidance()
     assert g.intrinsics.dist_coeffs == pytest.approx((-0.25, 0.05, 0.001, -0.002, 0.0))

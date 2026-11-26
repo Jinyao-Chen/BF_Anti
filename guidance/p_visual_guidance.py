@@ -93,6 +93,7 @@ class PStrikeCommand:
     lead_deg: float = 0.0        # 该帧横向提前量（度，0=关闭）
     v_proxy_mps: float = 0.0     # 该帧速度代理（speed_source=closing 时是纯视觉合成速度）
     pitch_floor_deg: float = 0.0  # 该帧实际生效的低头下限（超速治理/对准门/低空保护的结果）
+    bbox_clipped: bool = False    # 框贴左右边，单目测距已冻结
 
     # 控制量
     roll_cmd_deg: float = 0.0
@@ -210,10 +211,13 @@ class PVisualGuidance:
         ki_e_leak_s: float = 1.5,
         angle_limit_deg: float = 60.0,
         yaw_full_rate_dps: float = 300.0,
+        vfov_deg: Optional[float] = None,
     ) -> None:
         self.camera_tilt_deg = float(camera_tilt_deg)
         self.camera_yaw_offset_deg = float(camera_yaw_offset_deg)
-        self.intrinsics = CameraIntrinsics.from_fov(*image_size, hfov_deg=hfov_deg)
+        self.intrinsics = CameraIntrinsics.from_fov(
+            *image_size, hfov_deg=hfov_deg, vfov_deg=vfov_deg
+        )
         if camera_dist_coeffs:
             self.intrinsics = dataclasses.replace(
                 self.intrinsics,
@@ -427,6 +431,8 @@ class PVisualGuidance:
         dt: float = 0.05,
         fresh: bool = True,
         u_rate_px_s: Optional[float] = None,
+        live_rpy_deg: Optional[Sequence[float]] = None,
+        los_bbox_xyxy: Optional[Sequence[float]] = None,
     ) -> PStrikeCommand:
         """一个控制周期。bbox 为 None/退化时进入 SEARCH 或 COAST。
 
@@ -443,19 +449,60 @@ class PVisualGuidance:
                    else np.asarray(own_velocity_enu, dtype=float)[:3])
         roll_own, pitch_own, yaw_own = (float(own_rpy_deg[0]), float(own_rpy_deg[1]),
                                         float(own_rpy_deg[2]))
+        if live_rpy_deg is not None:
+            roll_live, pitch_live = float(live_rpy_deg[0]), float(live_rpy_deg[1])
+        else:
+            roll_live, pitch_live = roll_own, pitch_own
         z_own = float(own_pos[2])
+        numeric = [roll_own, pitch_own, yaw_own, roll_live, pitch_live,
+                   z_own, float(dt), float(timestamp)]
+        if not (np.all(np.isfinite(own_pos)) and np.all(np.isfinite(own_vel))
+                and all(np.isfinite(v) for v in numeric)):
+            return PStrikeCommand(
+                phase=PStrikePhase.SEARCH, valid=False, saturated=False,
+                throttle_pwm=float(self.hover_pwm),
+            )
 
         meas = self._measurement(bbox_xyxy)
         if meas is None:
-            return self._no_target(timestamp, own_pos, z_own, float(own_vel[2]))
+            return self._no_target(
+                timestamp, own_pos, z_own, float(own_vel[2]),
+                rpy_deg=(roll_live, pitch_live, yaw_own),
+            )
+
+        if fresh:
+            # A reacquisition after a short loss must not inherit the old loss
+            # timestamp; otherwise the second terminal dropout skips COAST.
+            if (self._lost_since is not None
+                    and float(timestamp) - float(self._lost_since) > 0.2):
+                # The old range/azimuth samples are separated by a real gap;
+                # including them in the next OLS fit would corrupt Vc/lambda_dot.
+                self._range_hist.clear()
+                self._az_hist.clear()
+                self._closing_mps = 1.0
+                self._lam_dps = None
+                self._lam_inertial_dps = None
+                self._last_s = None
+            self._lost_since = None
 
         u_px, v_px, s_px = meas
         e_u = (u_px - self.intrinsics.cx) / max(1e-6, self.intrinsics.cx)
         e_v = (v_px - self.intrinsics.cy) / max(1e-6, self.intrinsics.cy)
 
-        # 量测几何：像素 → 地球系视线 → (方位, 仰角)
+        # 量测几何：像素 → 地球系视线 → (方位, 仰角)。
+        # 外推框（刚体旋转像移已补偿到 now）不能与捕获时刻的历史姿态配对；
+        # 传了原始检测框时用它算惯性 LOS，外推框只用于图像误差。
+        u_los, v_los = u_px, v_px
+        if los_bbox_xyxy is not None:
+            try:
+                lx1, ly1, lx2, ly2 = (float(v) for v in los_bbox_xyxy[:4])
+                if all(np.isfinite([lx1, ly1, lx2, ly2])) and lx2 > lx1:
+                    u_los = 0.5 * (lx1 + lx2)
+                    v_los = 0.5 * (ly1 + ly2)
+            except (TypeError, ValueError, IndexError):
+                u_los, v_los = u_px, v_px
         los_e = pixel_to_earth_los(
-            (u_px, v_px), self.intrinsics, self.extrinsics,
+            (u_los, v_los), self.intrinsics, self.extrinsics,
             yaw_deg=yaw_own,
             pitch_deg=pitch_own, roll_deg=roll_own,
         )
@@ -474,7 +521,28 @@ class PVisualGuidance:
         # 纯视觉测距 / 测高（bbox 宽度代理）
         # 上钳位：框被压缩到 min_bbox_px 时反算距离会飙到几百米（实测 z_t_est 峰峰 816 m），
         # 垂直通道会被带成全油门爬升。交战距离 < 50 m，钳到 150 m 只是防呆。
-        range_raw = float(self.intrinsics.fx * self.target_width_m / max(s_px, 1e-3))
+        # A box touching the left/right edge is truncated: its width is no
+        # longer the target's projected width, so the monocular range would
+        # spike exactly when the target is closest.  Freeze range and keep
+        # only the direction error until the box is fully inside again.
+        clip_bbox = los_bbox_xyxy if los_bbox_xyxy is not None else bbox_xyxy
+        clipped_x = False
+        try:
+            cx1, cx2 = float(clip_bbox[0]), float(clip_bbox[2])
+            margin = max(2.0, 0.015 * float(self.intrinsics.width))
+            clipped_x = (cx1 <= margin) or (cx2 >= float(self.intrinsics.width) - margin)
+        except (TypeError, ValueError, IndexError):
+            clipped_x = False
+        last_range = None
+        if self._last_cmd is not None:
+            try:
+                last_range = float(self._last_cmd.range_est_m)
+            except (TypeError, ValueError):
+                last_range = None
+        if clipped_x and last_range is not None and np.isfinite(last_range):
+            range_raw = max(0.3, last_range)
+        else:
+            range_raw = float(self.intrinsics.fx * self.target_width_m / max(s_px, 1e-3))
         if self.range_max_m > 0.0:
             range_raw = min(range_raw, self.range_max_m)
         # 测距低通（量测调理）——**统一在这里平滑一次，下面全部用 range_s**。
@@ -494,6 +562,15 @@ class PVisualGuidance:
             self._r_filt = None          # 出滤波区即复位，回到终端时不留旧值
             range_s = range_raw
         range_est = range_s              # 下游（τ / 阶段判定 / PN 的 Vc / 速度代理）统一用平滑值
+        # 终端混合：3 m 附近曾同时硬切软饱和、PN、对准门、滚转门、前馈和
+        # 低空保护，单帧测距抖动会造成姿态阶跃。 用连续因子在 [2, 4.5] m
+        # 过渡：1 = 中远距策略，0 = 终端直通策略。
+        r_lo = max(0.5, float(self.terminal_range_m) * (2.0 / 3.0))
+        r_hi = max(r_lo + 0.5, float(self.terminal_range_m) * 1.5)
+        if np.isfinite(range_est):
+            term_w = float(np.clip((float(range_est) - r_lo) / max(1e-6, r_hi - r_lo), 0.0, 1.0))
+        else:
+            term_w = 1.0
         # 从下方向上打：垂直通道瞄准视线**下方** aim_below_deg 处，机体便始终吊在
         # 目标下方、保持上升着撞上去（俯仰仍用真实 el_los，相机继续咬住目标）。
         el_aim = el_los - self.aim_below_deg
@@ -520,7 +597,7 @@ class PVisualGuidance:
         # real loop runs at 50 Hz while Hailo delivers ~15-20 fps; appending
         # extrapolated boxes on every control tick would shrink the window
         # from ~0.4 s to ~0.16 s and make Vc (and the speed governor) noisy.
-        if fresh and np.isfinite(range_s):
+        if fresh and not clipped_x and np.isfinite(range_s):
             self._range_hist.append((float(timestamp), float(range_s)))
         if len(self._range_hist) > self.closing_fit_n:
             del self._range_hist[0: len(self._range_hist) - self.closing_fit_n]
@@ -612,6 +689,7 @@ class PVisualGuidance:
                 lead_deg = float(np.rad2deg(np.arctan2(
                     self.lead_gain * v_target_perp * tau_s, max(float(range_est), 1e-3))))
                 lead_deg = _clamp(lead_deg, -self.lead_clip_deg, self.lead_clip_deg)
+                lead_deg *= term_w
                 # 角度 -> 归一化图像误差（小角近似，用 fx/cx 转换）
                 e_lead_cmd = (self.intrinsics.fx / max(self.intrinsics.cx, 1e-6)
                               * float(np.tan(np.deg2rad(lead_deg))))
@@ -625,12 +703,11 @@ class PVisualGuidance:
         # 软饱和在大误差处压低指令，小误差处与线性一致（终端不受影响）。
         # 只在中远距(>terminal_range)启用软饱和：既压掉捕获段撞限幅，又不削弱
         # 终端修正（终端大误差时需要全增益）。判据是当帧测距 -> 仍无记忆。
-        w_soft = self.err_soft if range_est > self.terminal_range_m else 0.0
-
         def _soft(e, w):
             return e if w <= 0.0 else float(w * np.tanh(e / w))
-        e_u_cmd = _soft(e_u, w_soft)
-        e_v_cmd = _soft(e_v, w_soft)
+        w_soft = self.err_soft * term_w
+        e_u_cmd = term_w * _soft(e_u, w_soft) + (1.0 - term_w) * e_u
+        e_v_cmd = term_w * _soft(e_v, w_soft) + (1.0 - term_w) * e_v
 
         # 图像误差积分（可选；两个 ki 都为 0 时不改变任何行为，与已验证的纯 P 一致）。
         # 物理作用：纯 P 下"目标必须留在画面中心之外"才能产生姿态指令，稳态图像误差
@@ -681,17 +758,26 @@ class PVisualGuidance:
         pn_roll_deg = 0.0
         vc_pn = float(np.clip(self._closing_mps, self.pn_vc_min_mps, self.pn_vc_max_mps))
         if (self.pn_gain > 0.0
-                and range_est > self.terminal_range_m
+                and term_w > 0.0
                 and v_horiz_proxy > self.pn_min_speed_mps):
             # 终端段（bbox 撑满）不用它：那时像素速率爆掉、几何由追踪项主导。
             a_pn_mps2 = self.pn_gain * vc_pn * float(np.deg2rad(lam_dps))
             raw_deg = float(np.rad2deg(np.arctan(a_pn_mps2 / 9.80665)))
-            pn_roll_deg = self.pn_roll_cap_deg * float(np.tanh(raw_deg / self.pn_roll_cap_deg))
+            capped = (self.pn_roll_cap_deg * float(np.tanh(raw_deg / self.pn_roll_cap_deg))
+                      if self.pn_roll_cap_deg > 0.0 else raw_deg)
+            pn_roll_deg = term_w * capped
             roll_cmd += pn_roll_deg
         vc_used_mps = float(self._closing_mps)
         u_rate_used = u_rate_px_s_raw
 
-        pitch_bias = el_los - self.camera_tilt_deg
+        # 相机绕机体 x 轴上仰安装；滚转会把有效上仰角压到
+        # atan(tan(tilt)*cos(roll))。 用实时滚转计算，否则大滚转时俯仰
+        # 偏置会出现几度的几何下垂误差。
+        cos_roll = max(0.25, float(np.cos(np.deg2rad(roll_live))))
+        tilt_eff_deg = float(np.rad2deg(np.arctan(
+            np.tan(np.deg2rad(self.camera_tilt_deg)) * cos_roll
+        )))
+        pitch_bias = el_los - tilt_eff_deg
         pitch_cmd = pitch_bias - self.kp_pitch * e_v_cmd - self._ei_pitch_deg
         # 抬头爬升段：高度差还大时保持抬头（推力朝上、全力拔高），不做低头
         if self.pop_up_pitch_deg != 0.0 and (z_target_est - z_own) > self.pop_up_z_m:
@@ -730,22 +816,25 @@ class PVisualGuidance:
             e_u_gate = self._eu_filt
         else:
             e_u_gate = e_u
-        if self.align_gate > 0.0 and range_est > self.terminal_range_m:
+        if self.align_gate > 0.0 and term_w > 0.0:
             # 平滑（无记忆）对准门：|e_u| 在 gate 附近不再硬切，避免俯仰在
             # "-align_pitch" 与几何偏置之间极限环（实测 pitch 指令每 0.5 s 跳 8°）。
             g = float(np.tanh(abs(e_u_gate) / self.align_gate))
             floor_deg = -(self.align_pitch_limit_deg
                           + (self.max_pitch_down_deg - self.align_pitch_limit_deg) * (1.0 - g))
-            pitch_cmd = max(pitch_cmd, floor_deg)
+            # 终端把地板连续放回 -max_pitch_down，而不是在 3 m 处瞬间撤掉。
+            floor_eff = ((1.0 - term_w) * (-self.max_pitch_down_deg)
+                         + term_w * floor_deg)
+            pitch_cmd = max(pitch_cmd, floor_eff)
 
         # 横向对准门（可选，roll_align_gate>0 才启用）：|e_u| 超过门限后按 tanh 衰减
         # 滚转指令 —— 航向还没对准时不产生横向加速度，先靠偏航把机头转过去。
         # 动机：起飞段初始航向偏差 9~12°，滚转按"对准目标方位"把飞机横向推走（实测 8 s
         # 向左漂 0.6~2.8 m）；门限取 3.4°(0.10) 以内不衰减，故跟踪/终端段不受影响。
-        if self.roll_align_gate > 0.0 and range_est > self.terminal_range_m:
+        if self.roll_align_gate > 0.0 and term_w > 0.0:
             g_roll = float(np.tanh(max(0.0, abs(e_u_gate) - self.roll_align_gate)
                                   / max(1e-6, self.roll_align_soft)))
-            roll_cmd *= (1.0 - g_roll)
+            roll_cmd *= (1.0 - term_w * g_roll)
         # 高度环：两个 P 串联（高度误差→垂速指令，垂速误差→油门）。无 I、无 D。
         # 单 P 高度环在倾角升力损失下几乎无阻尼（实测 ±1.7 m 等幅振荡 → 终端脱靶），
         # 串联 P 用垂速反馈提供阻尼：ω=sqrt(kp_z*kp_vz*k_T*g)，ζ=kp_vz*k_T*g/(2ω)。
@@ -759,33 +848,66 @@ class PVisualGuidance:
                                           vz_limit=vz_limit, vz_ref_mps=vz_ref_mps)
 
         # 低空保护：非终端且高度低时限制低头、保底油门
-        low_guard = z_own < self.min_alt_guard_m and range_est > self.terminal_range_m
+        # 低空保护：常规段 3 m 起，终端段保留 1.5 m 硬地板；不要在 3 m
+        # 处把保护整体撤掉。 俯仰限制与油门保底采用同一连续/硬地板策略。
+        low_guard = z_own < self.min_alt_guard_m
+        hard_floor_guard = z_own < min(1.5, self.min_alt_guard_m)
+        # Continuous guard strength: 1 far from the target, 0 in the terminal
+        # dash, 1 again below the hard floor.  A boolean here created a 23-35
+        # degree pitch-limit step at the terminal boundary.
+        if hard_floor_guard:
+            guard_strength = 1.0
+        elif low_guard:
+            guard_strength = float(term_w)
+        else:
+            guard_strength = 0.0
 
         # 限幅（唯一的"非线性"，不是时间状态）
         max_pitch = self.max_pitch_up_deg
-        min_pitch = max(-self.max_pitch_down_deg, -15.0) if low_guard else -self.max_pitch_down_deg
+        min_pitch_free = -self.max_pitch_down_deg
+        min_pitch_guard = max(min_pitch_free, -15.0)
+        min_pitch = ((1.0 - guard_strength) * min_pitch_free
+                     + guard_strength * min_pitch_guard)
         min_pitch = max(min_pitch, speed_floor)   # 超速时抬高低头下限（见上）
         pitch_floor_used_deg = float(min_pitch)
         pitch_cmd = _clamp(pitch_cmd, min_pitch, max_pitch)
         roll_cmd = _clamp(roll_cmd, -self.max_roll_deg, self.max_roll_deg)
         yaw_rate = _clamp(yaw_rate, -self.max_yaw_rate_dps, self.max_yaw_rate_dps)
 
-        throttle = self._lift_ff_throttle(throttle, pitch_own, roll_own)
-        if low_guard:
-            throttle = max(throttle, self.hover_pwm)
+        throttle = self._lift_ff_throttle(throttle, pitch_live, roll_live)
+        if guard_strength > 0.0:
+            throttle = max(throttle, self.hover_pwm * guard_strength)
 
         thr_sat = throttle > self.thr_max_pwm or throttle < self.thr_min_pwm
         throttle = _clamp(throttle, self.thr_min_pwm, self.thr_max_pwm)
+        if not all(np.isfinite(v) for v in (roll_cmd, pitch_cmd, yaw_rate,
+                                           throttle, pitch_bias)):
+            return PStrikeCommand(
+                phase=PStrikePhase.SEARCH, valid=False, saturated=False,
+                throttle_pwm=float(self.hover_pwm),
+            )
 
-        # 接近率（bbox 相对膨胀率，用于命中防误判）
-        closing_ratio = 0.0
-        if self._last_s is not None and dt > 1e-6 and self._last_t is not None:
-            closing_ratio = float((s_px - self._last_s) / max(self._last_s, 1e-3) / dt)
-        self._last_s = float(s_px)
-        self._last_t = float(timestamp)
+        # 接近率（bbox 相对膨胀率，用于命中防误判）。 只接受真实检测帧：
+        # 外推框会按速度持续放大，否则漏检时能凭外推伪造 HIT。
+        closing_ratio = (float(self._last_cmd.closing_ratio)
+                         if self._last_cmd is not None else 0.0)
+        if fresh:
+            if (self._last_s is not None and self._last_t is not None
+                    and (float(timestamp) - self._last_t) > 1e-6):
+                closing_ratio = float(
+                    (s_px - self._last_s) / max(self._last_s, 1e-3)
+                    / (float(timestamp) - self._last_t)
+                )
+            else:
+                closing_ratio = 0.0
+            self._last_s = float(s_px)
+            self._last_t = float(timestamp)
+        if clipped_x:
+            closing_ratio = 0.0
 
         phase = PStrikePhase.TERMINAL if range_est <= self.terminal_range_m else PStrikePhase.TRACK
-        size_hit = range_est <= self.hit_range_m and closing_ratio > 0.0
+        size_hit = (fresh and not clipped_x and range_est <= self.hit_range_m
+                    and closing_ratio > 0.0)
         self._hit_count = self._hit_count + 1 if size_hit else 0
         hit = self._hit_count >= self.hit_dwell
         if hit:
@@ -825,6 +947,7 @@ class PVisualGuidance:
             lead_deg=float(lead_deg),
             v_proxy_mps=v_horiz_proxy,
             pitch_floor_deg=pitch_floor_used_deg,
+            bbox_clipped=bool(clipped_x),
         )
         self._last_cmd = cmd          # COAST 保持用（不是控制动态）
         return cmd
@@ -833,33 +956,53 @@ class PVisualGuidance:
     # 无目标 / 丢失
     # ------------------------------------------------------------------ #
     def _no_target(self, timestamp: float, own_pos: np.ndarray,
-                   z_own: float, v_up: float = 0.0) -> PStrikeCommand:
+                   z_own: float, v_up: float = 0.0,
+                   rpy_deg: Optional[Sequence[float]] = None) -> PStrikeCommand:
         # 无检测：标记"不在跟踪"，下一次拿到 bbox 时即为捕获瞬间（软起基准）
         self._was_tracking = False
         now = float(timestamp)
         if self._lost_since is None:
             self._lost_since = now
-        lost_for = now - self._lost_since
+        lost_for = max(0.0, now - self._lost_since)
         self._last_s = None
+        roll_now, pitch_now = 0.0, 0.0
+        if rpy_deg is not None:
+            try:
+                roll_now, pitch_now = float(rpy_deg[0]), float(rpy_deg[1])
+            except (TypeError, ValueError, IndexError):
+                pass
 
-        throttle = self._altitude_pwm(z_own, v_up)
+        # COAST 仍须有垂直阻尼/升力补偿/低空地板，不能退化成裸 hover_pwm。
+        z_ref = self.z_hold_m if self.z_hold_m is not None else float(z_own)
+        throttle = self._altitude_pwm_raw(z_own, v_up, z_ref=z_ref)
+        throttle = self._lift_ff_throttle(throttle, pitch_now, roll_now)
+        if z_own < self.min_alt_guard_m:
+            throttle = max(throttle, self.hover_pwm)
+        if self.z_hold_m is None:
+            # Pure coast: damp vertical speed but never let the damper become a
+            # near-full-throttle climb command (v_up=-2 m/s used to reach 1930).
+            throttle = min(throttle, self.hover_pwm + 150.0)
+        throttle = _clamp(throttle, self.thr_min_pwm, self.thr_max_pwm)
+
         if lost_for <= self.lost_timeout_s:
-            # COAST：短时间内**保持上一条姿态指令**，只让高度环继续工作。
-            # 终端 bbox 出画（约 3-4 m）时如果立刻回中/回平，最后 0.3 s 等于放弃控制
-            # （实测脱靶 2.66 m）；冻结姿态可以继续把机头压在目标方向上。
+            # 短时 COAST：保留最后视线方向，但姿态指令按时间常数回平，
+            # 偏航率立即归零。 在 ACRO 下继续冻结 45° 俯冲或 ±300 dps
+            # 偏航会把"暂时丢检"放大成撞地。
             last = self._last_cmd
             if last is not None:
+                decay = float(np.exp(-lost_for / 0.35))
                 return PStrikeCommand(
                     phase=PStrikePhase.COAST, valid=False, hit=False,
-                    roll_cmd_deg=last.roll_cmd_deg,
-                    pitch_cmd_deg=last.pitch_cmd_deg,
-                    pitch_bias_deg=last.pitch_bias_deg,
-                    yaw_rate_dps=last.yaw_rate_dps,
+                    roll_cmd_deg=float(last.roll_cmd_deg) * decay,
+                    pitch_cmd_deg=float(last.pitch_cmd_deg) * decay,
+                    pitch_bias_deg=float(last.pitch_bias_deg),
+                    yaw_rate_dps=0.0,
                     throttle_pwm=throttle,
                     range_est_m=last.range_est_m,
-                    closing_ratio=last.closing_ratio,
+                    closing_ratio=0.0,
                     az_los_deg=last.az_los_deg,
                     el_los_deg=last.el_los_deg,
+                    bbox_clipped=bool(getattr(last, "bbox_clipped", False)),
                 )
             return PStrikeCommand(
                 phase=PStrikePhase.COAST, valid=False,
@@ -1071,11 +1214,20 @@ def p_cmd_to_rc(
 
 
 def _rc(value: float) -> int:
-    return int(max(RC_MIN, min(RC_MAX, round(float(value)))))
+    v = float(value)
+    if not np.isfinite(v):
+        return RC_MID
+    return int(max(RC_MIN, min(RC_MAX, round(v))))
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(float(lo), min(float(hi), float(value)))
+    v = float(value)
+    if not np.isfinite(v):
+        # min(hi, NaN) returns hi in Python; that silently commands full
+        # throttle/roll.  Return a finite, in-range fallback instead.
+        lo_f, hi_f = float(lo), float(hi)
+        return 0.0 if (lo_f <= 0.0 <= hi_f) else lo_f
+    return max(float(lo), min(float(hi), v))
 
 
 def _wrap180(angle_deg: float) -> float:

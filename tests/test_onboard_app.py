@@ -4,14 +4,37 @@ from dataclasses import replace
 
 from onboard.app import OnboardApp
 from onboard.config import PowerConfig, load_config
+from onboard.fc.mode import AuxDiscovery
 from onboard.safety import SafetyDecision
 from onboard.types import Detection, FcState
+
+
+def verified_discovery():
+    # Matches config/onboard.example.json: ARM=AUX1/CH5, MSP OVERRIDE=AUX4/CH8,
+    # engage uses the same CH8 range.  BOXIDS order defines the flag bits.
+    return AuxDiscovery(
+        boxes=[(0, "ARM"), (1, "ANGLE"), (50, "MSP OVERRIDE")],
+        bit_index_by_pid={0: 0, 1: 1, 50: 2},
+        mode_ranges=[
+            {"permanent_id": 0, "aux_index": 0, "start_pwm": 1700,
+             "end_pwm": 2100, "channel_index": 4, "name": "ARM"},
+            {"permanent_id": 50, "aux_index": 3, "start_pwm": 1300,
+             "end_pwm": 2100, "channel_index": 7, "name": "MSP OVERRIDE"},
+        ],
+        rx_map=(0, 1, 3, 2, 4, 5, 6, 7),
+        arm_channel=4,
+        arm_range=(1700, 2100),
+        override_channel=7,
+        override_range=(1300, 2100),
+        engage_channel=7,
+    )
 
 
 class FakeState:
     def __init__(self, state):
         self._state = state
         self.started = False
+        self.aux_discovery = verified_discovery()
 
     def start(self):
         self.started = True
@@ -194,7 +217,8 @@ def test_stale_rc_immediately_closes_gate():
 def test_fc_angle_mode_with_rate_profile_is_denied():
     now = time.monotonic()
     st = fresh_state(now)
-    st.flight_mode_flags = 1  # Betaflight ANGLE_MODE is bit 0
+    # ANGLE is bit 1 in this Fake BOXIDS order; bit 0 is ARM.
+    st.flight_mode_flags = 1 << 1
     app, _, _, _ = build_app(state=st)
     app._engaged = True
     _, decision = app.step_once(now)

@@ -87,7 +87,8 @@ class HailoDetector:
         self.max_detections = int(getattr(cfg, "max_detections", 10))
         self.class_names = tuple(getattr(cfg, "class_names", ()))
         self.async_infer = bool(getattr(cfg, "async_infer", True))
-        self.timeout_ms = int(timeout_ms)
+        self.timeout_ms = int(getattr(cfg, "infer_timeout_ms", timeout_ms))
+        self._infer_failures = 0
         self.stale_s = max(0.05, float(stale_s))
         self.retry_s = max(0.1, float(retry_s))
         self.bgr_to_rgb = bool(bgr_to_rgb)
@@ -246,6 +247,16 @@ class HailoDetector:
                 return None, None
         return pair
 
+    @property
+    def last_frame_t(self) -> float:
+        with self._lock:
+            return float(self._last_frame_t)
+
+    @property
+    def last_pair_t(self) -> float:
+        with self._lock:
+            return float(self._last_pair_t)
+
     def detection_age(self, now: Optional[float] = None) -> float:
         """Age of the newest successful detection, in seconds (inf if none)."""
         now = self._clock() if now is None else float(now)
@@ -317,9 +328,21 @@ class HailoDetector:
                     continue
                 try:
                     self._infer(frame, stamp)
+                    self._infer_failures = 0
                 except Exception as exc:  # noqa: BLE001 - keep the loop alive
+                    self._infer_failures += 1
                     self._note_error("inference failed: %s" % (exc,))
-                    self._log.warning("Hailo inference failed: %s", exc)
+                    self._log.warning(
+                        "Hailo inference failed (%d consecutive): %s",
+                        self._infer_failures, exc,
+                    )
+                    if self._infer_failures >= 3:
+                        # A PCIe timeout / stream abort leaves the configured
+                        # model and buffers on a dead handle.  Rebuild the
+                        # VDevice rather than spinning on it forever.
+                        self._infer_failures = 0
+                        self._release()
+                        self._log.error("Hailo device released after repeated failures; reconfiguring")
                     if self._stop.wait(0.05):
                         break
         finally:
@@ -383,13 +406,33 @@ class HailoDetector:
 
         from hailo_platform import FormatType, VDevice  # lazy: laptop tests
 
-        vdevice = VDevice()
+        # Bind every C++-backed object before entering the try block.  On
+        # failure we must drop them while the VDevice is still alive:
+        # HailoRT 4.23 segfaults when bindings/configured/infer_model are
+        # destroyed after VDevice.release().
+        vdevice = None
+        infer_model = None
+        configured = None
+        bindings = None
+        input_stream = None
+        input_buffer = None
+        outputs = []
+        output_infos = []
+        input_shape = ()
+        error = None
         try:
+            vdevice = VDevice()
             infer_model = vdevice.create_infer_model(self.hef)
             infer_model.set_batch_size(1)
 
             input_stream = infer_model.input()
             input_shape = tuple(int(v) for v in input_stream.shape)
+            input_type = getattr(getattr(input_stream, "format", None), "type", None)
+            expected_u8 = getattr(FormatType, "UINT8", None)
+            if expected_u8 is not None and input_type is not None and input_type != expected_u8:
+                raise ValueError(
+                    "HEF input type is %s, expected UINT8" % (input_type,)
+                )
             if len(input_shape) != 3:
                 raise ValueError(
                     "unsupported HEF input shape %r (expected HWC)" % (input_shape,)
@@ -426,7 +469,6 @@ class HailoDetector:
             )
             bindings.input().set_buffer(input_buffer)
 
-            output_infos: list[dict[str, Any]] = []
             for stream in outputs:
                 if not stream.is_nms:
                     try:
@@ -450,12 +492,38 @@ class HailoDetector:
                         "dtype": np.dtype(dtype).name,
                     }
                 )
-        except Exception:
+        except Exception as exc:
+            # Leave the except block before releasing.  While an exception is
+            # being handled, its traceback keeps the raising frame alive, and
+            # that frame can hold ConfiguredInferModel/bindings.  Drop the
+            # traceback here, then clear the references outside the handler.
+            error = exc
             try:
-                vdevice.release()
-            except Exception:  # noqa: BLE001
+                exc.__traceback__ = None
+            except Exception:
                 pass
-            raise
+
+        if error is not None:
+            # Drop Python references first; their C++ destructors run against
+            # the still-live device.  Then release the device last.
+            bindings = configured = infer_model = None
+            input_stream = input_buffer = None
+            outputs = output_infos = []
+            # Explicitly drop the names too: assignment to None is enough for
+            # refcounting, but del makes the intent (and linters) unambiguous.
+            del bindings, configured, infer_model, input_stream
+            del input_buffer, outputs, output_infos
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+            if vdevice is not None:
+                try:
+                    vdevice.release()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise error
 
         with self._lock:
             self._vdevice = vdevice
@@ -485,18 +553,18 @@ class HailoDetector:
 
     def _infer(self, frame: Any, stamp: float) -> None:
         started = time.perf_counter()
-        rgb = frame
+        # Resize first, then convert colour: converting a 1280x720 frame and
+        # then squashing it to 640x640 wastes ~2x the colour-conversion work.
+        image, params = letterbox_image(
+            frame, self.input_width, self.input_height, pad_value=114
+        )
         if self.bgr_to_rgb:
             try:
                 import cv2
-
-                if getattr(frame, "ndim", 0) == 3 and frame.shape[2] == 3:
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                if getattr(image, "ndim", 0) == 3 and image.shape[2] == 3:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             except Exception:  # noqa: BLE001 - OpenCV is required only here
-                rgb = frame
-        image, params = letterbox_image(
-            rgb, self.input_width, self.input_height, pad_value=114
-        )
+                pass
         with self._lock:
             input_buffer = self._input_buffer
             bindings = self._bindings
@@ -577,11 +645,15 @@ class HailoDetector:
             self._frames += 1
             self._last_detections = list(dets)
             self._last_frame_t = float(frame_stamp)
+            # Keep the frame that produced this inference even when no
+            # target was found.  The previous code left an old pair for up to
+            # 350 ms, so the pilot's OSD froze instead of showing a live frame
+            # with no box.
+            self._last_pair = (frame, best)
+            self._last_pair_t = float(frame_stamp)
             if best is not None:
                 self._last_det = best
                 self._last_det_t = float(frame_stamp)
-                self._last_pair = (frame, best)
-                self._last_pair_t = float(frame_stamp)
             alpha = 0.1
             self._infer_ms = (
                 elapsed_ms if self._infer_ms <= 0.0 else (1.0 - alpha) * self._infer_ms + alpha * elapsed_ms
@@ -621,9 +693,8 @@ class HailoDetector:
             self._ready_event.clear()
         # CPython drops these immediately at reassignment; do it before the
         # device goes away so their C++ destructors run against a live device.
-        bindings = None
-        configured = None
-        infer_model = None
+        bindings = configured = infer_model = None
+        del bindings, configured, infer_model
         if vdevice is not None:
             try:
                 vdevice.release()

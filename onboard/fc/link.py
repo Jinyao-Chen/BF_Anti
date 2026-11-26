@@ -13,6 +13,7 @@ Threading contract:
 """
 from __future__ import annotations
 
+import select
 import socket
 import struct
 import threading
@@ -71,6 +72,13 @@ class SerialTransport:
                 timeout=self.read_timeout_s,
                 write_timeout=self.write_timeout_s,
             )
+            # Drop bytes left by a previous process/session; otherwise the
+            # parser can interpret a stale partial frame as the next reply.
+            try:
+                self._ser.reset_input_buffer()
+                self._ser.reset_output_buffer()
+            except Exception:
+                pass
         except (serial.SerialException, OSError, FileNotFoundError) as exc:
             self._ser = None
             raise LinkError("cannot open serial port %s: %s" % (self.port, exc)) from exc
@@ -79,10 +87,22 @@ class SerialTransport:
         ser = self._ser
         if ser is None or not bool(getattr(ser, "is_open", False)):
             raise LinkError("serial port is not open")
-        ser.timeout = max(0.001, float(timeout_s))
+        wait_s = max(0.001, float(timeout_s))
         try:
+            # select() avoids reconfiguring the tty (tcsetattr) on every read.
+            # pyserial's timeout property setter is relatively expensive at
+            # 50-100 queries/s and can flush pending termios settings.
             waiting = int(getattr(ser, "in_waiting", 0) or 0)
-            return ser.read(waiting if waiting > 0 else 1)
+            if waiting > 0:
+                return ser.read(min(waiting, 4096))
+            if hasattr(ser, "fileno"):
+                ready, _, _ = select.select([ser.fileno()], [], [], wait_s)
+                if not ready:
+                    return b""
+                waiting = int(getattr(ser, "in_waiting", 0) or 0)
+                return ser.read(min(waiting, 4096)) if waiting > 0 else ser.read(1)
+            ser.timeout = wait_s
+            return ser.read(1)
         except Exception as exc:
             raise LinkError("serial read failed: %s" % exc) from exc
 
@@ -90,8 +110,18 @@ class SerialTransport:
         ser = self._ser
         if ser is None or not bool(getattr(ser, "is_open", False)):
             raise LinkError("serial port is not open")
+        view = memoryview(data)
+        total = 0
         try:
-            ser.write(data)
+            while total < len(view):
+                written = ser.write(view[total:])
+                if written is None:
+                    break
+                if int(written) <= 0:
+                    raise LinkError("serial short write (0 bytes)")
+                total += int(written)
+        except LinkError:
+            raise
         except Exception as exc:
             raise LinkError("serial write failed: %s" % exc) from exc
 
@@ -179,6 +209,8 @@ class MspLink:
         self.reply_timeout_s = max(0.001, float(reply_timeout_s))
         self.reconnect_interval_s = max(0.0, float(reconnect_interval_s))
         self._parser = FrameParser()
+        self._parser_needs_reset = False
+        self._consecutive_timeouts = 0
         self._write_lock = threading.Lock()
         self._query_lock = threading.Lock()
         self._connect_lock = threading.Lock()
@@ -189,7 +221,10 @@ class MspLink:
         self.errors = 0
         self.tx_frames = 0
         self.rx_frames = 0
+        # last_rx_t: any valid MSP frame (including SET_RAW_RC ACKs).
+        # last_telem_rx_t: a real telemetry reply, used by the safety gate.
         self.last_rx_t = 0.0
+        self.last_telem_rx_t = 0.0
         self.last_error = ""
         self.last_rc = None
 
@@ -233,7 +268,11 @@ class MspLink:
                 return False
             self._connected = True
             self._generation += 1
-            self._parser.reset()
+            # Do not touch _parser here: _ensure_connected() can be called by
+            # the RC writer while the query thread is feeding the parser.
+            # The query thread performs the reset under _query_lock.
+            self._parser_needs_reset = True
+            self._consecutive_timeouts = 0
             return True
 
     def _drop(self, exc, expected_gen: Optional[int] = None) -> None:
@@ -272,8 +311,17 @@ class MspLink:
         frame = build_frame(int(cmd), payload, is_v2=bool(is_v2))
         timeout_s = self.reply_timeout_s if timeout is None else max(0.0, float(timeout))
         with self._query_lock:
+            if self._parser_needs_reset:
+                self._parser.reset()
+                self._parser_needs_reset = False
             if not self._write_frame(frame):
                 return None
+            # _write_frame may have just opened a new connection and set this
+            # flag after our pre-write reset.  Reset again before consuming
+            # the reply, still under _query_lock.
+            if self._parser_needs_reset:
+                self._parser.reset()
+                self._parser_needs_reset = False
             gen = self._generation
             if timeout_s <= 0.0:
                 return None
@@ -291,16 +339,30 @@ class MspLink:
                     continue
                 for reply in self._parser.feed(chunk):
                     self.rx_frames += 1
-                    self.last_rx_t = time.monotonic()
+                    rx_now = time.monotonic()
+                    self.last_rx_t = rx_now
+                    # SET_RAW_RC is acknowledged every frame by Betaflight;
+                    # that ACK proves the write path, not that telemetry is
+                    # alive.  Do not let it reset the safety freshness clock.
+                    if int(reply.cmd) != int(MSP_CMD.SET_RAW_RC):
+                        self.last_telem_rx_t = rx_now
                     if reply.cmd != int(cmd):
                         continue
+                    self._consecutive_timeouts = 0
                     if reply.error:
                         self.errors += 1
                         self.last_error = "MSP command %d returned error" % int(cmd)
                         return None
                     return reply.payload
             self.errors += 1
+            self._consecutive_timeouts = int(self._consecutive_timeouts) + 1
             self.last_error = "timeout waiting for MSP command %d" % int(cmd)
+            # A hardware UART does not raise on a disconnected FC; it simply
+            # returns no bytes.  Drop the link after a short run of timeouts
+            # so the next query attempts a real reopen/reconnect.
+            if self._consecutive_timeouts >= 5:
+                self._consecutive_timeouts = 0
+                self._drop("consecutive MSP timeouts", expected_gen=gen)
             return None
 
     # -- RC ----------------------------------------------------------------

@@ -161,17 +161,36 @@ def pixel_to_camera_ray(pixel_uv: tuple[float, float], intr: CameraIntrinsics) -
     yd = (v - intr.cy) / intr.fy
     x, y = xd, yd
     if intr.dist_coeffs:
-        dc = list(intr.dist_coeffs) + [0.0] * 5
+        # OpenCV's rational Brown-Conrady model: k1,k2,p1,p2,k3,k4,k5,k6.
+        # The old code silently truncated to the first five coefficients.
+        dc = list(intr.dist_coeffs) + [0.0] * 8
         k1, k2, p1, p2, k3 = dc[:5]
-        for _ in range(5):
+        k4, k5, k6 = dc[5:8]
+        for _ in range(8):
             r2 = x * x + y * y
-            radial = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
+            radial_num = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
+            radial_den = 1.0 + k4 * r2 + k5 * r2 * r2 + k6 * r2 * r2 * r2
+            if radial_den <= 1e-6:
+                break
+            radial = radial_num / radial_den
+            # A wide-angle model can invert outside the valid image region.
+            # Refuse the iteration rather than walking into inf/NaN.
+            if not np.isfinite(radial) or radial <= 0.05:
+                break
             dx = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
             dy = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
-            x = (xd - dx) / max(radial, 1e-6)
-            y = (yd - dy) / max(radial, 1e-6)
+            nx = (xd - dx) / radial
+            ny = (yd - dy) / radial
+            if not (np.isfinite(nx) and np.isfinite(ny)) or abs(nx) > 20.0 or abs(ny) > 20.0:
+                break
+            x, y = nx, ny
+        if not (np.isfinite(x) and np.isfinite(y)):
+            x, y = xd, yd
     ray = np.array([x, y, 1.0], dtype=float)
-    return ray / np.linalg.norm(ray)
+    norm = float(np.linalg.norm(ray))
+    if not np.isfinite(norm) or norm <= 1e-9:
+        return np.array([0.0, 0.0, 1.0], dtype=float)
+    return ray / norm
 
 
 def camera_ray_to_body(ray_cam: np.ndarray, extr: CameraExtrinsics) -> np.ndarray:

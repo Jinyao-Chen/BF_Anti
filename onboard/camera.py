@@ -18,6 +18,8 @@ Design constraints (see docs/sim2real/pi5_video.md):
 from __future__ import annotations
 
 import logging
+import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -69,6 +71,10 @@ class CameraStats:
     last_open_error: str = ""
     width: int = 0
     height: int = 0
+    capture_width: int = 0
+    capture_height: int = 0
+    requested_width: int = 0
+    requested_height: int = 0
     fps: float = 0.0
     fourcc: str = ""
     last_error: str = ""
@@ -101,10 +107,21 @@ class CameraSource:
     ) -> None:
         self.cfg = cfg
         self.device = str(getattr(cfg, "device", "/dev/video0"))
-        self.width = int(getattr(cfg, "width", 1280))
-        self.height = int(getattr(cfg, "height", 720))
-        self.fps = float(getattr(cfg, "fps", 30.0))
-        self.fourcc = str(getattr(cfg, "fourcc", "MJPG") or "MJPG")
+        # Requested sensor geometry is immutable.  The old code overwrote it
+        # with the driver's actual value, so after one 640x480 fallback every
+        # reconnect requested 640x480 and the calibration never recovered.
+        self._req_width = int(getattr(cfg, "width", 1280))
+        self._req_height = int(getattr(cfg, "height", 720))
+        self._req_fps = float(getattr(cfg, "fps", 30.0))
+        self._req_fourcc = str(getattr(cfg, "fourcc", "MJPG") or "MJPG")
+        self.strict_size = bool(getattr(cfg, "strict_size", True))
+        self.width = self._req_width       # output (post-rotation)
+        self.height = self._req_height
+        self.fps = self._req_fps
+        self.fourcc = self._req_fourcc
+        self._capture_width = self._req_width
+        self._capture_height = self._req_height
+        self._resolved_device = self.device
         self.warmup_s = max(0.0, float(getattr(cfg, "warmup_s", 1.0) or 0.0))
         self.rotate_deg = int(getattr(cfg, "rotate_deg", 0)) % 360
         if self.rotate_deg not in (0, 90, 180, 270):
@@ -230,6 +247,10 @@ class CameraSource:
                 last_open_error=self._last_open_error,
                 width=self.width,
                 height=self.height,
+                capture_width=self._capture_width,
+                capture_height=self._capture_height,
+                requested_width=self._req_width,
+                requested_height=self._req_height,
                 fps=self.fps,
                 fourcc=self.fourcc,
                 last_error=self._last_error,
@@ -258,8 +279,20 @@ class CameraSource:
                         continue
                     attempt = 0
                     fails = 0
+                frame_t = 0.0
                 try:
-                    ok, frame = cap.read()
+                    if hasattr(cap, "grab") and hasattr(cap, "retrieve"):
+                        if cap.grab():
+                            # Capture timestamp belongs to the moment the
+                            # driver handed us the frame, before MJPEG decode
+                            # and rotation add 20-60 ms of latency.
+                            frame_t = self._clock()
+                            ok, frame = cap.retrieve()
+                        else:
+                            ok, frame = False, None
+                    else:
+                        ok, frame = cap.read()
+                        frame_t = self._clock()
                 except Exception as exc:  # noqa: BLE001 - driver exceptions vary
                     ok, frame = False, None
                     self._record_error("read raised: %s" % (exc,))
@@ -280,7 +313,7 @@ class CameraSource:
                         self._stop.wait(0.5)
                     continue
                 fails = 0
-                self._on_frame(self._rotate_frame(frame))
+                self._on_frame(self._rotate_frame(frame), stamp=frame_t)
         finally:
             self._first_attempt.set()
             if cap is not None:
@@ -290,57 +323,141 @@ class CameraSource:
         """Apply the configured clockwise rotation to a captured frame."""
         if self.rotate_deg == 0:
             return frame
-        k = {90: -1, 180: 2, 270: 1}[self.rotate_deg]
-        return np.ascontiguousarray(np.rot90(frame, k=k))
+        try:
+            import cv2
+            code = {
+                90: cv2.ROTATE_90_CLOCKWISE,
+                180: cv2.ROTATE_180,
+                270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+            }[self.rotate_deg]
+            return cv2.rotate(frame, code)
+        except Exception:
+            k = {90: -1, 180: 2, 270: 1}[self.rotate_deg]
+            return np.ascontiguousarray(np.rot90(frame, k=k))
+
+    def _resolve_device(self) -> str:
+        """Return a capture node, tolerating a USB re-enumeration.
+
+        Prefer the configured path.  Only when it is gone and exactly one
+        /dev/v4l/by-id/*-video-index0 exists do we substitute it; picking the
+        first of several /dev/video* nodes could silently select the wrong
+        camera (or a metadata node).
+        """
+        if self._capture_factory is not None:
+            return self.device
+        if os.path.exists(self.device):
+            return self.device
+        # Only substitute a stable by-id node for a real /dev/videoN path.
+        # Arbitrary paths (tests, future device aliases) must not silently
+        # open whichever camera happens to be present.
+        if not re.fullmatch(r"video\d+", os.path.basename(self.device)):
+            return self.device
+        try:
+            import glob
+            candidates = sorted(glob.glob("/dev/v4l/by-id/*-video-index0"))
+        except Exception:
+            candidates = []
+        if len(candidates) == 1:
+            self._log.warning(
+                "camera %s disappeared; using stable node %s",
+                self.device, candidates[0],
+            )
+            return candidates[0]
+        return self.device
+
+    def _apply_controls(self, cap: Any) -> None:
+        """Apply optional raw V4L2 controls; unsupported properties are ignored."""
+        try:
+            import cv2
+        except Exception:
+            return
+        mappings = (
+            ("autofocus", "CAP_PROP_AUTOFOCUS", int),
+            ("auto_exposure", "CAP_PROP_AUTO_EXPOSURE", int),
+            ("exposure", "CAP_PROP_EXPOSURE", float),
+            ("gain", "CAP_PROP_GAIN", float),
+            ("auto_wb", "CAP_PROP_AUTO_WB", int),
+            ("wb_temp", "CAP_PROP_WB_TEMPERATURE", float),
+        )
+        for cfg_name, cv_name, caster in mappings:
+            value = getattr(self.cfg, cfg_name, None)
+            prop = getattr(cv2, cv_name, None)
+            if value is None or prop is None:
+                continue
+            try:
+                self._try_set(cap, int(prop), caster(value))
+            except (TypeError, ValueError):
+                pass
 
     def _open(self) -> Optional[Any]:
         """Open and configure the device; return the capture or None."""
         cap = None
         with self._lock:
             self._open_attempts += 1
+        device = self._resolve_device()
         try:
             if self._capture_factory is not None:
-                cap = self._capture_factory(self.device)
+                cap = self._capture_factory(device)
             else:
                 import cv2  # local import: no OpenCV needed until capture
 
-                cap = cv2.VideoCapture(self.device, CAP_V4L2)
+                cap = cv2.VideoCapture(device, CAP_V4L2)
             if cap is None or not cap.isOpened():
-                self._record_open_error("cannot open %s" % self.device)
+                self._record_open_error("cannot open %s" % device)
                 if cap is not None:
                     cap.release()
                 return None
 
             # MJPG first: the Pi 5 USB bandwidth cannot carry raw YUYV at
             # 1280x720@30 reliably, and MJPG is what the UVC camera exposes.
-            self._try_set(cap, CAP_PROP_FOURCC, fourcc_code(self.fourcc))
-            self._try_set(cap, CAP_PROP_FRAME_WIDTH, int(self.width))
-            self._try_set(cap, CAP_PROP_FRAME_HEIGHT, int(self.height))
-            self._try_set(cap, CAP_PROP_FPS, float(self.fps))
+            self._try_set(cap, CAP_PROP_FOURCC, fourcc_code(self._req_fourcc))
+            self._try_set(cap, CAP_PROP_FRAME_WIDTH, int(self._req_width))
+            self._try_set(cap, CAP_PROP_FRAME_HEIGHT, int(self._req_height))
+            self._try_set(cap, CAP_PROP_FPS, float(self._req_fps))
             # Keep only the newest driver buffer so userspace never replays a
             # backlog of stale frames after a scheduling hiccup.
             self._try_set(cap, CAP_PROP_BUFFERSIZE, 1)
+            self._apply_controls(cap)
 
-            actual_w = int(self._safe_get(cap, CAP_PROP_FRAME_WIDTH, self.width))
-            actual_h = int(self._safe_get(cap, CAP_PROP_FRAME_HEIGHT, self.height))
-            actual_fps = float(self._safe_get(cap, CAP_PROP_FPS, self.fps))
+            actual_w = int(self._safe_get(cap, CAP_PROP_FRAME_WIDTH, self._req_width))
+            actual_h = int(self._safe_get(cap, CAP_PROP_FRAME_HEIGHT, self._req_height))
+            actual_fps = float(self._safe_get(cap, CAP_PROP_FPS, self._req_fps))
+            raw_fcc = int(self._safe_get(cap, CAP_PROP_FOURCC, 0.0))
+            actual_fourcc = (
+                "".join(chr((raw_fcc >> (8 * i)) & 0xFF) for i in range(4)).strip()
+                if raw_fcc > 0 else self._req_fourcc
+            )
             if actual_w <= 0 or actual_h <= 0:
                 self._record_open_error("driver reported invalid geometry")
                 cap.release()
                 return None
+            if actual_w != self._req_width or actual_h != self._req_height:
+                message = (
+                    "camera geometry mismatch: got %dx%d, requested %dx%d "
+                    "(static intrinsics would be wrong)"
+                    % (actual_w, actual_h, self._req_width, self._req_height)
+                )
+                self._log.error("%s", message)
+                if self.strict_size:
+                    self._record_open_error(message)
+                    cap.release()
+                    return None
+            out_w, out_h = ((actual_h, actual_w)
+                            if self.rotate_deg in (90, 270) else (actual_w, actual_h))
             with self._lock:
                 self._opens += 1
                 self._last_open_t = self._clock()
                 self._last_error = ""
-                self.width = actual_w
-                self.height = actual_h
-                self.fps = actual_fps if actual_fps > 0.0 else self.fps
+                self._capture_width = actual_w
+                self._capture_height = actual_h
+                self.width = out_w
+                self.height = out_h
+                self.fps = actual_fps if actual_fps > 0.0 else self._req_fps
+                self.fourcc = actual_fourcc or self._req_fourcc
             self._log.info(
-                "camera %s open: %dx%d @ %.1f fps %s (requested %dx%d @ %.1f)",
-                self.device, actual_w, actual_h, actual_fps, self.fourcc,
-                int(getattr(self.cfg, "width", actual_w)),
-                int(getattr(self.cfg, "height", actual_h)),
-                float(getattr(self.cfg, "fps", actual_fps)),
+                "camera %s open: %dx%d @ %.1f fps %s -> %dx%d (requested %dx%d @ %.1f)",
+                device, actual_w, actual_h, actual_fps, self.fourcc, out_w, out_h,
+                self._req_width, self._req_height, self._req_fps,
             )
             return cap
         except Exception as exc:  # noqa: BLE001 - cv2 raises generic exceptions
@@ -367,8 +484,8 @@ class CameraSource:
             return default
         return value if value == value else default  # NaN guard
 
-    def _on_frame(self, frame: Any) -> None:
-        now = self._clock()
+    def _on_frame(self, frame: Any, stamp: float = 0.0) -> None:
+        now = float(stamp) if float(stamp or 0.0) > 0.0 else self._clock()
         with self._lock:
             opened_t = self._last_open_t
             warming = self.warmup_s > 0.0 and (now - opened_t) < self.warmup_s

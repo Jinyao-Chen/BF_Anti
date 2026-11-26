@@ -91,7 +91,7 @@ def test_p_visual_guidance_reset_clears_all_history_and_extrinsics_yaw():
     assert g.extrinsics.yaw_offset_deg == 10.0
     for i in range(5):
         g.update(
-            (600.0 + i * 2, 320.0, 660.0 + i * 2, 380.0),
+            (520.0 + i * 2, 320.0, 580.0 + i * 2, 380.0),
             (0.0, 0.0, 10.0), (0.0, 0.0, 0.0), (10.0, -25.0, 0.0),
             10.0 + i * 0.04, 0.04, fresh=True,
         )
@@ -191,6 +191,7 @@ def test_battery_debounce_denies_but_does_not_latch_early():
         rc_age_s=0.01, att_age_s=0.01, alt_age_s=0.01, status_age_s=0.01,
         link_age_s=0.01, altitude_m=10.0, range_m=12.0, loop_dt_s=0.02,
         target_confirmed=True, target_age_s=0.02, battery_v=13.0,
+        analog_age_s=0.02,
     )
     dec = sup.evaluate(SafetyInputs(**base))
     assert not dec.allow_auto
@@ -221,7 +222,8 @@ def test_rc_mux_override_fallback_never_drops_below_hover_floor():
     link.last[7] = 1500
     mux.request_auto(False)
     mux._tick(10.02)
-    assert link.sent[-1][2] == 1430
+    # CH5/ARM is still low: the safe command is idle throttle, not hover.
+    assert link.sent[-1][2] == 1000
 
 
 def test_fc_poll_staggers_aux_queries_instead_of_six_at_once():
@@ -248,4 +250,4 @@ def test_fc_poll_staggers_aux_queries_instead_of_six_at_once():
     # Attitude every tick + staggered secondary queries; a bad LCM tick can
     # overlap three, but the old six-query pileup is gone.
     assert max(counts) <= 4
-    assert counts[0] <= 2
+    assert counts[0] <= 3

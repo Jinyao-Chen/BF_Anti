@@ -51,7 +51,10 @@ def _responses():
 
 
 def _cfg():
-    return FcConfig(telemetry_hz=100.0, reply_timeout_s=0.01)
+    # These tests exercise the SITL-only 0x3015 decoder, so opt in explicitly;
+    # the real-aircraft default is disabled (standard BF 4.5.3 ignores it).
+    return FcConfig(telemetry_hz=100.0, reply_timeout_s=0.01,
+                    enable_msp2_position=True)
 
 
 def test_single_poll_decodes_all_fields_and_uses_degrees():

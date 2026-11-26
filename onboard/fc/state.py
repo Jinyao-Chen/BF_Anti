@@ -29,11 +29,14 @@ from msp import (
     decode_altitude,
     decode_analog,
     decode_attitude,
+    decode_boxids,
     decode_msp2_position_state,
     decode_rc,
+    decode_rx_map,
     decode_status,
     decode_status_ex,
 )
+from onboard.fc.mode import resolve_aux_layout
 from onboard.types import FcState
 
 
@@ -63,11 +66,24 @@ class FcStateEstimator:
         self._errors = 0
         self._tick = 0
         self._position_misses = 0
-        self._position_enabled = True
+        self._position_enabled = bool(getattr(cfg, "enable_msp2_position", False))
         self._status_ex_misses = 0
         self._legacy_status = False
         self._running = False
         self._thread = None
+        # AUX/BOOT metadata is fetched one small query per telemetry tick.
+        # BOXIDS order defines the MSP_STATUS flightModeFlags bit index, so
+        # this is the only safe way to evaluate ANGLE without guessing.
+        self._aux_discovery = None
+        self._aux_discovery_gen = -1
+        self._meta_gen = -1
+        self._meta_step = 0
+        self._meta_failures = 0
+        self._meta_boxid_pages = []
+        self._meta_range_payload = None
+        self._meta_extra_payload = None
+        self._meta_rx_map_payload = None
+        self._meta_retry_at = 0.0
 
     # -- lifecycle ---------------------------------------------------------
     @property
@@ -117,8 +133,151 @@ class FcStateEstimator:
             return None
 
     def _link_stamp(self, fallback):
-        stamp = float(getattr(self.link, "last_rx_t", 0.0) or 0.0)
+        # SET_RAW_RC ACKs must not make a dead telemetry link look fresh.
+        stamp = float(getattr(self.link, "last_telem_rx_t", 0.0) or 0.0)
+        if stamp <= 0.0:
+            stamp = float(getattr(self.link, "last_rx_t", 0.0) or 0.0)
         return stamp if stamp > 0.0 else float(fallback)
+
+    # -- AUX / mode metadata ---------------------------------------------
+    def _reset_metadata(self, generation: int) -> None:
+        self._meta_gen = int(generation)
+        self._meta_step = 0
+        self._meta_failures = 0
+        self._meta_page = 0
+        self._meta_boxid_pages = []
+        self._meta_range_payload = None
+        self._meta_extra_payload = None
+        self._meta_rx_map_payload = None
+        self._meta_retry_at = 0.0
+        self._aux_discovery = None
+        self._aux_discovery_gen = -1
+
+    def _meta_query(self, cmd, payload=b"", is_v2=False):
+        timeout = min(self._timeout, max(0.02, float(
+            getattr(self.cfg, "aux_meta_timeout_s", 0.08) or 0.08
+        )))
+        try:
+            return self.link.query(cmd, is_v2=is_v2, timeout=timeout, payload=payload)
+        except TypeError:
+            try:
+                return self.link.query(cmd, is_v2=is_v2, timeout=timeout)
+            except TypeError:
+                try:
+                    return self.link.query(cmd, is_v2=is_v2)
+                except Exception:
+                    self._errors += 1
+                    return None
+            except Exception:
+                self._errors += 1
+                return None
+        except Exception:
+            self._errors += 1
+            return None
+
+    def _metadata_retry(self, now: float) -> None:
+        self._meta_failures += 1
+        # A BOXIDS page was exactly 32 entries, so the next page may legitimately
+        # be empty.  After a few attempts treat that as EOF rather than failing
+        # the whole metadata pass forever.
+        if self._meta_step == 0 and self._meta_page > 0 and self._meta_failures >= 3:
+            self._meta_step = 2
+            self._meta_failures = 0
+            return
+        if self._meta_failures < 3:
+            return
+        # Do not sit on a 80 ms timeout every tick forever.  Retry the whole
+        # metadata pass after a backoff; auto authority stays closed meanwhile.
+        self._meta_step = 0
+        self._meta_failures = 0
+        self._meta_page = 0
+        self._meta_boxid_pages = []
+        self._meta_range_payload = None
+        self._meta_extra_payload = None
+        self._meta_rx_map_payload = None
+        self._meta_retry_at = float(now) + 5.0
+
+    def _poll_metadata(self, now: float) -> None:
+        if not bool(getattr(self.cfg, "enable_aux_discovery", True)):
+            return
+        gen = int(getattr(self.link, "generation", 0) or 0)
+        if gen <= 0:
+            return
+        if gen != self._meta_gen:
+            self._reset_metadata(gen)
+        if self._meta_step >= 99 or float(now) < self._meta_retry_at:
+            return
+
+        if self._meta_step == 0:
+            if self._meta_page > 7:
+                self._meta_step = 2
+                self._meta_failures = 0
+                return
+            payload = self._meta_query(
+                MSP_CMD.BOXIDS, payload=bytes([self._meta_page]), is_v2=False
+            )
+            if payload is None:
+                self._metadata_retry(now)
+                return
+            if len(payload) == 0:
+                self._metadata_retry(now)
+                return
+            self._meta_boxid_pages.append(payload)
+            self._meta_page += 1
+            if len(payload) < 32 or self._meta_page > 7:
+                self._meta_step = 2
+            self._meta_failures = 0
+            return
+
+        if self._meta_step == 2:
+            payload = self._meta_query(MSP_CMD.MODE_RANGES, is_v2=False)
+            if payload is None:
+                payload = self._meta_query(MSP_CMD.MODE_RANGES, is_v2=True)
+            if payload is None:
+                self._metadata_retry(now)
+                return
+            self._meta_range_payload = payload
+            self._meta_step = 3
+            self._meta_failures = 0
+            return
+
+        if self._meta_step == 3:
+            payload = self._meta_query(MSP_CMD.MODE_RANGES_EXTRA, is_v2=False)
+            if payload is None:
+                payload = self._meta_query(MSP_CMD.MODE_RANGES_EXTRA, is_v2=True)
+            if payload is not None:
+                self._meta_extra_payload = payload
+            # Optional: proceed after one failed attempt.
+            self._meta_step = 4
+            self._meta_failures = 0
+            return
+
+        if self._meta_step == 4:
+            payload = self._meta_query(MSP_CMD.RX_MAP, is_v2=False)
+            if payload is None:
+                self._metadata_retry(now)
+                return
+            self._meta_rx_map_payload = payload
+            self._meta_step = 5
+            self._meta_failures = 0
+            return
+
+        if self._meta_step == 5:
+            ids = []
+            for page in self._meta_boxid_pages:
+                ids.extend(decode_boxids(page))
+            ranges = ([self._meta_range_payload]
+                      if self._meta_range_payload else [])
+            rx_map = decode_rx_map(self._meta_rx_map_payload)
+            discovery = resolve_aux_layout(
+                ids, names=(), range_payloads=ranges, rx_map=rx_map,
+                extra_payload=self._meta_extra_payload, cfg=self.cfg,
+            )
+            with self._lock:
+                self._aux_discovery = discovery
+                self._aux_discovery_gen = gen
+            self._meta_step = 99
+            return
 
     def _poll_once(self) -> None:
         now = time.monotonic()
@@ -167,10 +326,12 @@ class FcStateEstimator:
                 channels = decode_rc(payload)
                 if channels is not None:
                     rc_stamp = time.monotonic()
-                    updates["rc"] = channels
+                    ch_tuple = tuple(int(v) for v in channels)
+                    updates["rc"] = ch_tuple
                     updates["rc_t"] = rc_stamp
-                    self._rc = tuple(channels)
-                    self._rc_t = rc_stamp
+                    with self._lock:
+                        self._rc = ch_tuple
+                        self._rc_t = rc_stamp
                 elif len(payload) > 0:
                     # Short/corrupt reply: a decode error, not a 0-channel FC.
                     self._errors += 1
@@ -206,6 +367,9 @@ class FcStateEstimator:
             if status is not None:
                 updates["armed"] = bool(status["armed"])
                 updates["flight_mode_flags"] = int(status["flight_mode_flags"])
+                updates["extended_flight_mode_flags"] = bytes(
+                    status.get("extended_flight_mode_flags", b"") or b""
+                )
                 updates["status_t"] = time.monotonic()
 
         if tick % self.ANALOG_EVERY == 3:
@@ -237,6 +401,8 @@ class FcStateEstimator:
                 if self._position_misses >= self.POSITION_MAX_MISSES:
                     self._position_enabled = False
 
+        self._poll_metadata(now)
+
         link_stamp = self._link_stamp(now)
         with self._lock:
             state = self._state
@@ -254,10 +420,15 @@ class FcStateEstimator:
             snap = dataclasses.replace(self._state)
         snap.generation = int(getattr(self.link, "generation", snap.generation) or 0)
         snap.errors = int(getattr(self.link, "errors", 0) or 0) + self._errors
-        link_stamp = float(getattr(self.link, "last_rx_t", 0.0) or 0.0)
+        link_stamp = self._link_stamp(0.0)
         if link_stamp > 0.0 and link_stamp > snap.link_t:
             snap.link_t = link_stamp
         return snap
+
+    @property
+    def aux_discovery(self):
+        with self._lock:
+            return self._aux_discovery
 
     def attitude_at(self, query_t: float) -> tuple[float, float, float]:
         """Return linearly interpolated (roll, pitch, yaw) at query_t."""

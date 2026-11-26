@@ -42,6 +42,9 @@ __all__ = [
 DEFAULT_INPUT_SIZE = 640
 DEFAULT_PAD_VALUE = 114
 _EPS = 1e-9
+# Bound the O(N^2) greedy NMS on a malformed/very low-threshold frame.
+# 300 is far above the 10 detections the tracker can use.
+MAX_NMS_CANDIDATES = 300
 
 
 @dataclass(frozen=True)
@@ -231,6 +234,17 @@ def nms(boxes: Any, scores: Any, iou_threshold: float = 0.45) -> np.ndarray:
     count = int(scores.shape[0])
     if count == 0:
         return np.empty(0, dtype=np.int64)
+    original = np.arange(count, dtype=np.int64)
+    finite = np.isfinite(scores) & np.isfinite(boxes).all(axis=1)
+    if not bool(finite.all()):
+        boxes, scores, original = boxes[finite], scores[finite], original[finite]
+        count = int(scores.shape[0])
+        if count == 0:
+            return np.empty(0, dtype=np.int64)
+    if count > MAX_NMS_CANDIDATES:
+        order = np.lexsort((np.arange(count, dtype=np.int64), -scores))[:MAX_NMS_CANDIDATES]
+        boxes, scores, original = boxes[order], scores[order], original[order]
+        count = int(scores.shape[0])
     threshold = float(iou_threshold)
     order = np.lexsort((np.arange(count, dtype=np.int64), -scores))
     keep: list[int] = []
@@ -242,7 +256,7 @@ def nms(boxes: Any, scores: Any, iou_threshold: float = 0.45) -> np.ndarray:
         rest = order[1:]
         ious = _box_iou_one(boxes[current], boxes[rest])
         order = rest[ious <= threshold]
-    return np.asarray(keep, dtype=np.int64)
+    return original[np.asarray(keep, dtype=np.int64)]
 
 
 def _validate_max_detections(max_detections: int) -> int:
@@ -264,7 +278,11 @@ def _finish(
         return []
     out: list[Detection] = []
     for box, score, class_id in zip(boxes_model, scores, class_ids):
+        if not np.isfinite(box).all() or not np.isfinite(float(score)):
+            continue
         x1, y1, x2, y2 = params.to_source_box(box)
+        if not all(np.isfinite([x1, y1, x2, y2])):
+            continue
         if x2 - x1 <= 0.5 or y2 - y1 <= 0.5:
             continue
         out.append(

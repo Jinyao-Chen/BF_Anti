@@ -98,7 +98,16 @@ class ShutdownGuard:
 
         raw = int(channels[idx])
         if raw < int(cfg.high_threshold):
-            self._seen_low = True
+            # Hysteresis: only the genuinely low segment arms the edge
+            # detector.  1300-1700 is a dead band; 1500 or a boot-time 0 must
+            # not count as a deliberate low.
+            low_min = int(getattr(cfg, "min_low_threshold", 885))
+            low_max = int(getattr(cfg, "low_threshold", 1300))
+            if low_min <= raw <= low_max:
+                self._seen_low = True
+            elif raw < low_min:
+                # 0/unplugged/failsafe is not a pilot low edge.
+                self._seen_low = False
             self._drop_high()
             return False
         if not self._seen_low:
@@ -112,7 +121,9 @@ class ShutdownGuard:
 
         throttle = int(channels[2]) if len(channels) > 2 else 1500
         if throttle > int(cfg.max_throttle):
-            self._drop_high()
+            # Pulling the throttle down after this must not complete a hold
+            # that began while the throttle was high: require a fresh cycle.
+            self._require_low()
             return False
 
         if self._high_since is None:
@@ -139,7 +150,9 @@ def request_poweroff(timeout_s: float = 5.0) -> tuple[bool, str]:
         )
     except Exception as exc:  # missing binary, timeout, permission denied
         return False, repr(exc)
-    detail = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    detail = "; ".join(part for part in (stdout, stderr) if part)
     if proc.returncode == 0:
         return True, detail or "poweroff queued"
     return False, "exit %s: %s" % (proc.returncode, detail or "no output")

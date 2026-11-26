@@ -20,6 +20,7 @@ def fresh(**kw):
         target_confirmed=True,
         target_age_s=0.02,
         battery_v=16.0,
+        analog_age_s=0.02,
         detector_ok=True,
         estop=False,
     )

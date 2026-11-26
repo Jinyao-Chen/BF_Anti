@@ -74,7 +74,12 @@ def test_high_throttle_blocks_the_hold():
     assert not g.update(now + 0.1, make_state(now + 0.1, ch6=2000, throttle=1500))
     assert not g.update(now + 1.0, make_state(now + 1.0, ch6=2000, throttle=1500))
     assert not g.update(now + 1.1, make_state(now + 1.1, ch6=2000, throttle=1000))
-    assert g.update(now + 2.1, make_state(now + 2.1, ch6=2000, throttle=1000))
+    # The high-throttle interval invalidated the edge: the switch must go LOW
+    # again before a new hold can start.
+    assert not g.update(now + 2.1, make_state(now + 2.1, ch6=2000, throttle=1000))
+    assert not g.update(now + 2.2, make_state(now + 2.2, ch6=1000, throttle=1000))
+    assert not g.update(now + 2.3, make_state(now + 2.3, ch6=2000, throttle=1000))
+    assert g.update(now + 4.4, make_state(now + 4.4, ch6=2000, throttle=1000))
 
 
 def test_stale_rc_or_status_blocks():

@@ -54,8 +54,16 @@ class RCMux:
         self._safe_hover_thr = int(base_throttle)
         self._mode_raw = 1500
         self._mode_seen_low = False
+        self._reset_needed = False
         self._auto_request = False
         self._arm_prev = None
+        # Optional (start, end) PWM range discovered from MSP_MODE_RANGES.
+        # None keeps the legacy >1700 threshold (bench/SITL).
+        self.arm_range = None
+        # Called as fn(safe_throttle) -> (roll, pitch, throttle, yaw) when the
+        # override switch is still high outside AUTO.  In ACRO, 1500 holds the
+        # current dive attitude, so the app supplies a level-attitude command.
+        self.level_rpyt_fn = None
         self.base_throttle = base_throttle
         self.crsf_timeout = crsf_timeout
         self.cmd_timeout = cmd_timeout
@@ -82,6 +90,32 @@ class RCMux:
 
     def publish_cmd(self, cmd):
         self._cmd = cmd
+
+    def _arm_active(self, ch) -> bool:
+        if self.arm_channel is None or len(ch) <= self.arm_channel:
+            return True
+        raw = int(ch[self.arm_channel])
+        rng = getattr(self, "arm_range", None)
+        if rng is not None:
+            try:
+                return int(rng[0]) <= raw <= int(rng[1])
+            except (TypeError, ValueError, IndexError):
+                pass
+        return raw > 1700
+
+    def _safe_override_rpyt(self, ch):
+        """Command when BOXMSPOVERRIDE is still on but AUTO is not active."""
+        if not self._arm_active(ch):
+            return (1500, 1500, 1000, 1500)
+        cb = getattr(self, "level_rpyt_fn", None)
+        if callable(cb):
+            try:
+                values = tuple(int(v) for v in cb(int(self._safe_hover_thr)))
+                if len(values) >= 4:
+                    return values[:4]
+            except Exception:
+                pass
+        return (1500, 1500, int(self._safe_hover_thr), 1500)
 
     def request_auto(self, want):
         """Ask the mux to engage.  The mux still owns the final decision.
@@ -173,10 +207,14 @@ class RCMux:
         # Only sample pilot throttle when BOXMSPOVERRIDE is OFF (mode_pos == 0)
         # so MSP_RC echo values never overwrite the safe hover reference.
         override_active = (self.mode_channel is not None and self._mode_pos > 0)
-        if not override_active:
-            # Never let a low/dropped pilot stick become the fail-safe
-            # throttle: keep at least the configured hover value.
-            self._safe_hover_thr = _clamp(max(int(ch[2]), int(self.base_throttle)))
+        arm_active = self._arm_active(ch)
+        if not override_active and arm_active:
+            # Never let a low/dropped pilot stick or a full-climb stick become
+            # the fail-safe throttle.
+            max_safe = min(1700, int(self.base_throttle) + 150)
+            self._safe_hover_thr = _clamp(
+                min(max(int(ch[2]), int(self.base_throttle)), max_safe)
+            )
         if self._auto and self.stick_takeover and self._takeover(ch):
             self._exit_auto()
             self._inhibit = True
@@ -186,8 +224,9 @@ class RCMux:
         elif override_active:
             # Betaflight 4.5 MSP_RC returns overridden RPYT while BOXMSPOVERRIDE
             # is active; echoing ch[0..3] back latches the last dive/throttle.
-            # Send safe level hover instead until the pilot flips CH8 low.
-            rpyt = (1500, 1500, self._safe_hover_thr, 1500)
+            # In ACRO, (1500,1500) is zero body rate, not level flight: the app
+            # callback computes a level-attitude command from live rpy.
+            rpyt = self._safe_override_rpyt(ch)
         else:
             # Physical manual mode: passthrough pilot RPYT seamlessly.
             rpyt = (ch[0], ch[1], ch[2], ch[3])
@@ -197,7 +236,9 @@ class RCMux:
         if hasattr(self.msp, "send_rc_16"):
             channels = list(rpyt) + ch[4:16]
             if len(channels) < 16:
-                channels.extend([1500] * (16 - len(channels)))
+                # Missing AUX must mean "low/disarmed", never a 1500 mid value
+                # that could activate an unconfigured mode range.
+                channels.extend([1000] * (16 - len(channels)))
             self.msp.send_rc_16(channels)
         else:
             aux = ch[4:8]
@@ -214,6 +255,9 @@ class RCMux:
             self._mode_seen_low = False
             self._mode_pos = 0
             self._inhibit = True
+            # On recovery, a switch already LOW has no falling edge; remember
+            # to clear a latched safety fault when the pilot next visits LOW.
+            self._reset_needed = True
             if self._auto:
                 self._exit_auto()
 
@@ -235,10 +279,16 @@ class RCMux:
         raw = int(ch[self.mode_channel])
         self._mode_raw = raw
         prev_pos = self._mode_pos
+        reset_called = False
         if raw < 1300:
             pos = 0
             self._mode_seen_low = True
             self._inhibit = False
+            if self._reset_needed:
+                self._reset_needed = False
+                if self.on_disengage:
+                    self.on_disengage()
+                    reset_called = True
         elif raw > 1700:
             pos = 2
         else:
@@ -246,7 +296,7 @@ class RCMux:
         self._mode_pos = pos
 
         if self.arm_channel is not None and len(ch) > self.arm_channel:
-            arm_high = int(ch[self.arm_channel]) > 1700
+            arm_high = self._arm_active(ch)
             if not arm_high:
                 # Disarmed: kill auto immediately and do not let a stale
                 # request re-engage while the mode switch is still high.
@@ -256,19 +306,19 @@ class RCMux:
                     # Manual disarm is also the pilot's reset edge for a
                     # latched safety fault.
                     self.on_disengage()
+                    reset_called = True
                 self._inhibit = True
             elif self._arm_prev is False:
-                # Manual arm edge: pilot consent.  Clear the disarm inhibit
-                # and treat it like having seen the switch in a safe
-                # position, so an already-visible target can be engaged.
+                # Manual arm edge: pilot consent.  Clear the disarm inhibit but
+                # preserve C7: the mode switch must still have been seen LOW
+                # at least once, even if it was already high at arming.
                 self._inhibit = False
-                self._mode_seen_low = True
             self._arm_prev = bool(arm_high)
 
         if pos == 0:
             if self._auto:
                 self._exit_auto()
-            elif prev_pos != 0 and self.on_disengage:
+            elif prev_pos != 0 and self.on_disengage and not reset_called:
                 # Pilot deliberately selected FORCE MANUAL.  This is also
                 # the reset edge for a latched safety fault, so AUTO can be
                 # re-entered after the switch is cycled low -> mid/high.
@@ -320,7 +370,7 @@ class RCMux:
             self._was_substituting = False
             self.mode = "PASSTHROUGH"
             if override_active:
-                return (1500, 1500, self._safe_hover_thr, 1500)
+                return self._safe_override_rpyt(ch)
             return (ch[0], ch[1], ch[2], ch[3])
         if not self._was_substituting:
             self._ramp_start = now
