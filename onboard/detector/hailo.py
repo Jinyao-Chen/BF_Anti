@@ -326,10 +326,13 @@ class HailoDetector:
                     if self._stop.wait(0.002):
                         break
                     continue
+                need_release = False
+                infer_failed = False
                 try:
                     self._infer(frame, stamp)
                     self._infer_failures = 0
                 except Exception as exc:  # noqa: BLE001 - keep the loop alive
+                    infer_failed = True
                     self._infer_failures += 1
                     self._note_error("inference failed: %s" % (exc,))
                     self._log.warning(
@@ -337,14 +340,16 @@ class HailoDetector:
                         self._infer_failures, exc,
                     )
                     if self._infer_failures >= 3:
-                        # A PCIe timeout / stream abort leaves the configured
-                        # model and buffers on a dead handle.  Rebuild the
-                        # VDevice rather than spinning on it forever.
                         self._infer_failures = 0
-                        self._release()
-                        self._log.error("Hailo device released after repeated failures; reconfiguring")
-                    if self._stop.wait(0.05):
-                        break
+                        need_release = True
+                    # Drop traceback frames holding _infer() C++ locals
+                    # (job, bindings, configured) before releasing VDevice.
+                    exc.__traceback__ = None
+                if need_release:
+                    self._release()
+                    self._log.error("Hailo device released after repeated failures; reconfiguring")
+                if infer_failed and self._stop.wait(0.05):
+                    break
         finally:
             self._release()
 
@@ -416,6 +421,8 @@ class HailoDetector:
         bindings = None
         input_stream = None
         input_buffer = None
+        stream = None
+        buffer = None
         outputs = []
         output_infos = []
         input_shape = ()
@@ -429,6 +436,13 @@ class HailoDetector:
             input_shape = tuple(int(v) for v in input_stream.shape)
             input_type = getattr(getattr(input_stream, "format", None), "type", None)
             expected_u8 = getattr(FormatType, "UINT8", None)
+            auto_type = getattr(FormatType, "AUTO", None)
+            if expected_u8 is not None and auto_type is not None and input_type == auto_type:
+                try:
+                    input_stream.set_format_type(expected_u8)
+                    input_type = getattr(getattr(input_stream, "format", None), "type", None)
+                except Exception:  # noqa: BLE001
+                    pass
             if expected_u8 is not None and input_type is not None and input_type != expected_u8:
                 raise ValueError(
                     "HEF input type is %s, expected UINT8" % (input_type,)
@@ -507,12 +521,12 @@ class HailoDetector:
             # Drop Python references first; their C++ destructors run against
             # the still-live device.  Then release the device last.
             bindings = configured = infer_model = None
-            input_stream = input_buffer = None
+            input_stream = input_buffer = stream = buffer = None
             outputs = output_infos = []
             # Explicitly drop the names too: assignment to None is enough for
             # refcounting, but del makes the intent (and linters) unambiguous.
             del bindings, configured, infer_model, input_stream
-            del input_buffer, outputs, output_infos
+            del input_buffer, stream, buffer, outputs, output_infos
             try:
                 import gc
                 gc.collect()
@@ -695,6 +709,11 @@ class HailoDetector:
         # device goes away so their C++ destructors run against a live device.
         bindings = configured = infer_model = None
         del bindings, configured, infer_model
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
         if vdevice is not None:
             try:
                 vdevice.release()

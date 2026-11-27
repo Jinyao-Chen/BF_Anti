@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import signal
 import sys
@@ -77,6 +78,11 @@ class OnboardApp:
         self._retry_lock = threading.Lock()
         self._retry_thread: Optional[threading.Thread] = None
         self._poweroff_on_exit = False
+        self._poweroff_failed = False
+        # A worker-thread crash must make systemd see a failure so Restart=
+        # on-failure can bring the service back.  Keep this flag even if a
+        # later SIGTERM overwrites _stop_reason.
+        self._fatal_exit = False
         self._last_reason_event_t = 0.0
         self._last_tick_error_event_t = 0.0
         self._fc_seen_at: Optional[float] = None
@@ -165,6 +171,9 @@ class OnboardApp:
                 rate_hz=self.cfg.fc.rc_hz,
                 channel_source=self.state.rc_snapshot,
                 rc_stale_timeout=self.cfg.fc.link_timeout_s,
+                override_channel=(
+                    None if self.cfg.fc.override_from_mode else self.cfg.fc.aux_override
+                ),
             )
             self.mux.on_engage = self._on_engage
             self.mux.on_disengage = self._on_disengage
@@ -182,23 +191,44 @@ class OnboardApp:
         """Level-attitude RPYT for ACRO when override is still active.
 
         Called from the mux thread.  In rate mode, (1500,1500) means zero
-        angular rate and holds a dive; here we close a P loop on live roll/
+        angular rate and holds a dive; here we close a P loop on fresh roll/
         pitch to bring the body level while retaining safe hover throttle.
+        If attitude is missing or stale, fall back to neutral zero-rate sticks
+        rather than driving full rate from frozen telemetry.
         """
         c = self.cfg.control
-        if str(getattr(c, "att_mode", "rate")).lower() != "rate":
-            # ANGLE self-levels on mid sticks.
-            return (1500, 1500, int(safe_throttle), 1500)
         try:
             snap = self.state.snapshot() if self.state is not None else None
-            rpy = getattr(snap, "rpy_deg", (0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0)
-            if not bool(getattr(snap, "armed", False)):
+            now = time.monotonic()
+            # Only cut throttle to 1000 when status telemetry has actually been
+            # received, is fresh, and confirms disarmed; a reconnect transient
+            # with status_t == 0 (or a frozen disarmed packet) must not drop
+            # airborne throttle to idle.
+            status_t = float(getattr(snap, "status_t", 0.0) or 0.0)
+            max_status_age = float(getattr(self.cfg.safety, "max_status_age_s", 0.6))
+            status_fresh = status_t > 0.0 and (now - status_t) <= max_status_age
+            if status_fresh and not bool(getattr(snap, "armed", False)):
                 return (1500, 1500, 1000, 1500)
+            if str(getattr(c, "att_mode", "rate")).lower() != "rate":
+                # ANGLE self-levels on mid sticks.
+                return (1500, 1500, int(safe_throttle), 1500)
+            att_t = float(getattr(snap, "att_t", 0.0) or 0.0)
+            max_att_age = float(getattr(self.cfg.safety, "max_att_age_s", 0.25))
+            if att_t <= 0.0 or (now - att_t) > max_att_age:
+                return (1500, 1500, int(safe_throttle), 1500)
+            rpy = getattr(snap, "rpy_deg", (0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0)
+            roll_deg = float(rpy[0])
+            pitch_deg = float(rpy[1])
+            if not (math.isfinite(roll_deg) and math.isfinite(pitch_deg)):
+                return (1500, 1500, int(safe_throttle), 1500)
             k_att = float(c.att_rate_gain)
             rate_max = float(c.rate_max_dps)
             scale = 500.0 / max(1e-6, float(c.rate_full_dps))
-            p_dps = max(-rate_max, min(rate_max, -k_att * float(rpy[0])))
-            q_dps = max(-rate_max, min(rate_max, -k_att * float(rpy[1])))
+            phi_dot = -k_att * roll_deg
+            theta_dot = -k_att * pitch_deg
+            cos_phi = math.cos(math.radians(roll_deg))
+            p_dps = max(-rate_max, min(rate_max, phi_dot))
+            q_dps = max(-rate_max, min(rate_max, theta_dot * cos_phi))
             roll = int(round(1500.0 + float(c.roll_sign) * p_dps * scale))
             pitch = int(round(1500.0 - float(c.pitch_sign) * q_dps * scale))
             return (
@@ -415,9 +445,9 @@ class OnboardApp:
         out: ControlOutput,
         now: float,
     ) -> SafetyInputs:
-        rc = tuple(state.rc) if state.rc else (1500,) * 16
+        rc = tuple(state.rc) if state.rc else (1000,) * 16
         def aux(idx: int) -> int:
-            return int(rc[idx]) if 0 <= idx < len(rc) else 1500
+            return int(rc[idx]) if 0 <= idx < len(rc) else 1000
         target_age = (now - detection.t) if detection is not None and detection.t > 0.0 else float("inf")
         rng = float("inf")
         if out.command is not None:
@@ -444,13 +474,6 @@ class OnboardApp:
             and self._fc_seen_at is not None
             and (now - self._fc_seen_at) < self.STARTUP_GRACE_S
         )
-        mode_pwm = aux(self.cfg.fc.aux_engage)
-        if self.cfg.fc.override_from_mode:
-            # The same 3-pos switch drives BOXMSPOVERRIDE on the FC: low is a
-            # physical CRSF bypass, mid/high let the companion write RPYT.
-            override_on = mode_pwm >= 1300
-        else:
-            override_on = aux(self.cfg.fc.aux_override) > 1700
         disc = None
         try:
             disc = getattr(self.state, "aux_discovery", None)
@@ -458,6 +481,25 @@ class OnboardApp:
             disc = None
         if disc is not None and getattr(disc, "arm_range", None) is not None:
             self.mux.arm_range = tuple(disc.arm_range)
+        else:
+            self.mux.arm_range = None
+        if not self.cfg.fc.override_from_mode:
+            if disc is not None and getattr(disc, "override_range", None) is not None:
+                self.mux.override_range = tuple(disc.override_range)
+            else:
+                self.mux.override_range = None
+        mode_pwm = aux(self.cfg.fc.aux_engage)
+        if self.cfg.fc.override_from_mode:
+            # The same 3-pos switch drives BOXMSPOVERRIDE on the FC: low is a
+            # physical CRSF bypass, mid/high let the companion write RPYT.
+            override_on = mode_pwm >= 1300
+        else:
+            ovr_pwm = aux(self.cfg.fc.aux_override)
+            if disc is not None and getattr(disc, "override_range", None) is not None:
+                lo, hi = int(disc.override_range[0]), int(disc.override_range[1])
+                override_on = (lo <= ovr_pwm <= hi)
+            else:
+                override_on = ovr_pwm > 1700
         layout_ok, angle_active = self._fc_layout_state(disc, state)
         coast_max_s = min(
             float(getattr(self.controller.guidance, "lost_timeout_s", 0.0) or 0.0),
@@ -536,17 +578,22 @@ class OnboardApp:
             and disc.arm_range is not None
         )
         if self.cfg.fc.override_from_mode:
+            # Low position (~1000) MUST remain outside BOXMSPOVERRIDE so the
+            # pilot always retains a physical CRSF bypass; reject always-on
+            # ranges like (900, 2100).
             override_ok = (
                 disc.override_channel is not None
                 and int(disc.override_channel) == int(self.cfg.fc.aux_engage)
                 and disc.override_range is not None
-                and int(disc.override_range[0]) <= 1300
+                and 1100 < int(disc.override_range[0]) <= 1300
                 and int(disc.override_range[1]) >= 1700
             )
         else:
             override_ok = (
                 disc.override_channel is not None
                 and int(disc.override_channel) == int(self.cfg.fc.aux_override)
+                and disc.override_range is not None
+                and int(disc.override_range[0]) > 1100
             )
         if expected == "angle":
             angle_ok = (
@@ -569,10 +616,10 @@ class OnboardApp:
             if pending_reset == "engage":
                 # Keep the tracker lock, clear guidance integrators/history,
                 # and adapt hover_pwm to the pilot's real hover throttle.
+                # Never clear a latched CRITICAL safety fault on engage.
                 self.controller.guidance.reset()
                 if pending_hover is not None and 1250 <= int(pending_hover) <= 1700:
                     self.controller.guidance.hover_pwm = float(pending_hover)
-                self.safety.reset()
             else:
                 self.controller.reset()
                 self.safety.reset()
@@ -681,13 +728,15 @@ class OnboardApp:
             obj.start()
         except Exception as exc:
             LOG.exception("start %s failed", name)
-            self._start_failures[name] = time.monotonic()
+            with self._retry_lock:
+                self._start_failures[name] = time.monotonic()
             self._event("component_start_failed", component=name, error=repr(exc))
             if name in ("state", "mux"):
                 # Without the FC reader or the RC writer there is no runtime.
                 raise
         else:
-            self._start_failures.pop(name, None)
+            with self._retry_lock:
+                self._start_failures.pop(name, None)
 
     def start(self) -> None:
         """Build and start every component; raises only for critical ones."""
@@ -825,7 +874,8 @@ class OnboardApp:
         try:
             self._start_with_retry()
             if self._stop.is_set():
-                return 0
+                # A worker may have crashed between start() and this check.
+                return 1 if self._fatal_exit else 0
             LOG.info(
                 "onboard loop started at %.1f Hz (blackbox=%s)",
                 self.cfg.control.rate_hz,
@@ -886,11 +936,16 @@ class OnboardApp:
         finally:
             final_reason = self._stop_reason if self._stop_reason != "stop" else stop_reason
             self.stop(final_reason)
+        if self._fatal_exit or final_reason == "thread_exception" or self._poweroff_failed:
+            return 1
         return 0
 
     def request_stop(self, reason: str = "stop") -> None:
         """Async-signal-safe stop trigger; cleanup runs in run()'s finally block."""
-        self._stop_reason = str(reason)
+        reason = str(reason)
+        if reason == "thread_exception":
+            self._fatal_exit = True
+        self._stop_reason = reason
         self._stop.set()
 
     def stop(self, reason: str = "stop") -> None:
@@ -936,6 +991,16 @@ class OnboardApp:
             retry_thread.join(timeout=1.5)
         if self._poweroff_on_exit:
             self._poweroff_on_exit = False
+            self._poweroff_failed = False
+            # Flush logging handlers before sync/poweroff so tail lines hit SD.
+            for handler in list(logging.getLogger().handlers):
+                try:
+                    handler.flush()
+                    stream = getattr(handler, "stream", None)
+                    if stream is not None and hasattr(stream, "fileno"):
+                        os.fsync(stream.fileno())
+                except Exception:
+                    pass
             try:
                 os.sync()
             except Exception:
@@ -948,12 +1013,11 @@ class OnboardApp:
                     ok, detail = False, repr(exc)
                 last_detail = str(detail)
                 if ok:
-                    self._event("poweroff_queued", detail=last_detail)
                     LOG.warning("RC shutdown: system poweroff queued (%s)", last_detail)
                     return
                 LOG.error("RC shutdown attempt %d failed: %s", attempt + 1, last_detail)
                 time.sleep(1.0)
-            self._event("poweroff_failed", error=last_detail)
+            self._poweroff_failed = True
             LOG.error("RC shutdown: all poweroff attempts failed: %s", last_detail)
 
 
@@ -982,7 +1046,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Leave evidence on disk even when the config itself is broken; the
         # service is about to hit systemd's restart limit.
         try:
-            fallback_dir = os.path.abspath(os.path.expanduser(args.log_dir or "logs"))
+            fallback_dir = os.path.join(
+                os.path.abspath(os.path.expanduser(args.log_dir or "logs")),
+                "config_errors",
+            )
             fallback = TelemetryLog(fallback_dir, hz=1.0, max_runs=5)
             if fallback.start(collect_run_meta(argv=list(argv) if argv is not None else list(sys.argv[1:]))):
                 fallback.event(

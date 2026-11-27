@@ -882,7 +882,13 @@ def decode_motor_channels(channels):
     values = [max(1000, min(2000, int(v))) for v in channels]
     if len(values) > 16:
         raise ValueError("at most 16 RC channels")
-    values.extend([1500] * (16 - len(values)))
+    # Missing RPYT defaults to neutral sticks + idle throttle; missing AUX
+    # channels must stay low (1000) so unconfigured mode ranges never trip.
+    rpyt_defaults = (1500, 1500, 1000, 1500)
+    while len(values) < 4:
+        values.append(rpyt_defaults[len(values)])
+    if len(values) < 16:
+        values.extend([1000] * (16 - len(values)))
     return tuple(values)
 
 

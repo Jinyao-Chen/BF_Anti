@@ -534,9 +534,12 @@ def test_hailo_configure_failure_clears_cpp_objects_before_release(monkeypatch, 
     import sys
     import types
 
-    state = {"destroyed": 0, "release_saw_live": False}
+    state = {"created": 0, "destroyed": 0, "release_saw_live": False}
 
     class Base:
+        def __init__(self):
+            state["created"] += 1
+
         def __del__(self):
             state["destroyed"] += 1
 
@@ -572,7 +575,7 @@ def test_hailo_configure_failure_clears_cpp_objects_before_release(monkeypatch, 
             return InferModel()
 
         def release(self):
-            state["release_saw_live"] = state["destroyed"] < 3
+            state["release_saw_live"] = state["destroyed"] < state["created"]
 
     fake = types.ModuleType("hailo_platform")
     fake.FormatType = SimpleNamespace(UINT8="UINT8", FLOAT32="FLOAT32")
@@ -586,7 +589,8 @@ def test_hailo_configure_failure_clears_cpp_objects_before_release(monkeypatch, 
     det = HailoDetector(DetectorConfig(hef=str(hef)))
     with pytest.raises(RuntimeError):
         det._configure()
-    assert state["destroyed"] >= 3
+    assert state["created"] == 4
+    assert state["destroyed"] == state["created"]
     assert state["release_saw_live"] is False
 
 
@@ -682,9 +686,9 @@ def test_level_callback_signs_and_scale():
     app.state._state.rpy_deg = (10.0, 20.0, 0.0)
     app.state._state.armed = True
     roll, pitch, throttle, yaw = app._level_rpyt(1430)
-    # k=6: p=-60 dps, q=-120 dps; 500/600 RC-per-dps.
+    # k=6: p=-60 dps, q=-120*cos(10 deg) dps; 500/600 RC-per-dps.
     assert roll == 1450
-    assert pitch == 1600
+    assert 1597 <= pitch <= 1600
     assert throttle == 1430 and yaw == 1500
 
 
@@ -745,3 +749,356 @@ def test_ack_does_not_refresh_telemetry_stamp():
     assert link.last_telem_rx_t == 0.0
     link.query(MSP_CMD.GET_ATTITUDE, timeout=0.05)
     assert link.last_telem_rx_t > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Second-pass review regression tests (P0 & P1 fixes)
+# ---------------------------------------------------------------------------
+
+def test_level_rpyt_returns_neutral_when_attitude_stale():
+    import time
+    from onboard.app import OnboardApp
+    from onboard.config import AppConfig
+    from onboard.fc.state import FcState
+
+    cfg = AppConfig()
+    app = OnboardApp(cfg)
+    now = time.monotonic()
+    stale_snap = FcState(
+        rpy_deg=(30.0, -40.0, 0.0),
+        armed=True,
+        status_t=now,
+        att_t=now - 2.0,  # stale beyond max_att_age_s
+    )
+    app.state = SimpleNamespace(snapshot=lambda: stale_snap)
+    assert app._level_rpyt(1450) == (1500, 1500, 1450, 1500)
+
+
+def test_level_rpyt_does_not_cut_throttle_before_first_status():
+    import time
+    from onboard.app import OnboardApp
+    from onboard.config import AppConfig
+    from onboard.fc.state import FcState
+
+    cfg = AppConfig()
+    app = OnboardApp(cfg)
+    now = time.monotonic()
+    snap = FcState(rpy_deg=(0.0, -20.0, 0.0), armed=False, status_t=0.0, att_t=now)
+    app.state = SimpleNamespace(snapshot=lambda: snap)
+    r, p, thr, y = app._level_rpyt(1450)
+    assert thr == 1450
+    assert p < 1500  # nose-up recovery rate
+
+
+def test_link_stamp_does_not_fallback_to_ack_last_rx_t():
+    from onboard.config import FcConfig
+    from onboard.fc.state import FcStateEstimator
+
+    link = SimpleNamespace(last_telem_rx_t=0.0, last_rx_t=123.45)
+    est = FcStateEstimator(link, FcConfig())
+    assert est._link_stamp(999.0) == 0.0
+
+
+def test_decode_motor_channels_pads_missing_aux_with_1000():
+    from msp import decode_motor_channels
+
+    ch = decode_motor_channels([1500, 1500, 1400, 1500, 1800, 1000, 1000, 1000])
+    assert len(ch) == 16
+    assert ch[8:] == (1000,) * 8
+
+
+def test_safety_low_battery_debounce_resets_after_recovery():
+    from onboard.config import SafetyConfig
+    from onboard.safety import SafetyInputs, SafetySupervisor
+
+    sup = SafetySupervisor(SafetyConfig(min_battery_v=13.6), battery_debounce_s=1.0)
+
+    def mk(t, v):
+        return SafetyInputs(
+            now=t, armed=True, override_on=True, engage_on=True,
+            rc_age_s=0.01, att_age_s=0.01, alt_age_s=0.01, status_age_s=0.01,
+            link_age_s=0.01, altitude_m=5.0, range_m=5.0, loop_dt_s=0.02,
+            target_confirmed=True, target_age_s=0.05, battery_v=v,
+            angle_mode_active=False, expected_att_mode="rate",
+            fc_layout_ok=True, analog_age_s=0.01,
+        )
+
+    assert sup.evaluate(mk(10.0, 13.5)).reason == "battery_low_pending"
+    assert sup.evaluate(mk(10.2, 15.2)).allow_auto is True
+    # A second brief sag 5s later must restart debounce, not latch immediately.
+    d = sup.evaluate(mk(15.2, 13.5))
+    assert d.reason == "battery_low_pending"
+    assert sup._latched is None
+
+
+def test_bbox_tracker_update_candidates_reinitialises_after_coast_window():
+    from perception.bbox_tracker import BboxTracker
+
+    tr = BboxTracker(confirm_frames=2, max_coast_s=0.2, gate_px=60.0, gate_frac=0.05)
+    tr.update((100.0, 100.0, 140.0, 140.0), dt=0.05, timestamp=0.0)
+    out = tr.update((100.0, 100.0, 140.0, 140.0), dt=0.05, timestamp=0.05)
+    assert out.confirmed
+    # Far candidate exceeds gate during coast window -> must report "gated".
+    far = SimpleNamespace(bbox=(500.0, 400.0, 540.0, 440.0), conf=0.9)
+    out1 = tr.update_candidates([far], dt=0.1, timestamp=0.15)
+    assert out1.reason == "gated"
+    # Once coast window expires, the same far candidate immediately re-initialises.
+    out2 = tr.update_candidates([far], dt=0.15, timestamp=0.30)
+    assert out2.reason == 'det'
+    assert out2.bbox is not None and abs(out2.bbox[0] - 500.0) < 1e-6
+
+
+def test_p_visual_guidance_low_alt_throttle_floor_and_hit_dwell():
+    from guidance.p_visual_guidance import PStrikePhase, PVisualGuidance
+
+    g = PVisualGuidance(hover_pwm=1430.0, thr_min_pwm=1180.0, hit_dwell=2, hit_range_m=2.0)
+    # Low altitude (2.0 m) at range ~3.5 m: guard_strength ~0.6 -> floor > thr_min_pwm.
+    cmd = g.update(
+        bbox_xyxy=(590.0, 310.0, 690.0, 410.0),
+        own_position_enu=(0.0, 0.0, 2.0),
+        own_velocity_enu=(0.0, 0.0, 0.0),
+        own_rpy_deg=(0.0, 0.0, 0.0),
+        timestamp=1.0, dt=0.02, fresh=True,
+    )
+    assert cmd.throttle_pwm >= 1180.0
+
+    # 50 Hz extrapolated frames between fresh detections must not reset hit_count.
+    g2 = PVisualGuidance(image_size=(1280, 720), hover_pwm=1430.0, hit_dwell=2, hit_range_m=5.0)
+    g2.update((540.0, 260.0, 740.0, 460.0), (0.0, 0.0, 5.0), (0.0, 0.0, 0.0),
+              (0.0, 0.0, 0.0), timestamp=1.00, dt=0.02, fresh=True)
+    c1 = g2.update((520.0, 240.0, 760.0, 480.0), (0.0, 0.0, 5.0), (0.0, 0.0, 0.0),
+                   (0.0, 0.0, 0.0), timestamp=1.05, dt=0.02, fresh=True)
+    assert not c1.hit
+    # Intervening extrapolated frame
+    g2.update((515.0, 235.0, 765.0, 485.0), (0.0, 0.0, 5.0), (0.0, 0.0, 0.0),
+              (0.0, 0.0, 0.0), timestamp=1.07, dt=0.02, fresh=False)
+    c2 = g2.update((500.0, 220.0, 780.0, 500.0), (0.0, 0.0, 5.0), (0.0, 0.0, 0.0),
+                   (0.0, 0.0, 0.0), timestamp=1.10, dt=0.02, fresh=True)
+    assert c2.hit and c2.phase == PStrikePhase.HIT
+
+
+def test_visual_strike_guidance_closing_speed_sign():
+    import numpy as np
+    from guidance.visual_strike_guidance import InterceptTrajectory
+
+    traj = InterceptTrajectory()
+    st = traj.update(
+        target_position_enu=np.array([0.0, 12.0, 5.0]),
+        target_velocity_enu=np.array([0.0, 0.0, 0.0]),
+        own_position_enu=np.array([0.0, 0.0, 5.0]),
+        own_velocity_enu=np.array([0.0, 6.0, 0.0]),
+    )
+    assert st.closing_speed_mps > 5.5
+
+
+def test_fc_identify_print_human_does_not_raise(capsys):
+    from scripts.fc_identify import print_human
+
+    print_human({
+        "port": "/dev/ttyACM0",
+        "baud": 115200,
+        "firmware": {
+            "api_version": {"protocol": 0, "major": 1, "minor": 46},
+            "variant": "BTFL",
+            "fc_version": {"year": 4, "month": 5, "patch": 3, "version_string": "4.5.3"},
+            "board": {"board_identifier": "S7X2", "board_name": "TEST", "hardware_revision": 0},
+        },
+        "aux": {
+            "boxids": [0, 1],
+            "ranges": [],
+            "arm_channel": 4,
+            "angle_channel": 5,
+            "override_channel": 7,
+            "warnings": [],
+        },
+        "config_snippet": {},
+    })
+    assert "4.5.3" in capsys.readouterr().out
+
+
+def test_level_rpyt_does_not_cut_throttle_on_stale_disarmed_status():
+    import time
+    from onboard.app import OnboardApp
+    from onboard.config import AppConfig
+    from onboard.fc.state import FcState
+
+    app = OnboardApp(AppConfig())
+    now = time.monotonic()
+    snap = FcState(
+        rpy_deg=(0.0, -20.0, 0.0),
+        armed=False,
+        status_t=now - 5.0,   # frozen disarmed packet
+        att_t=now,             # attitude is still live
+    )
+    app.state = SimpleNamespace(snapshot=lambda: snap)
+    _r, p, thr, _y = app._level_rpyt(1450)
+    assert thr == 1450
+    assert p < 1500
+
+
+def test_coast_clears_altitude_integrator():
+    from guidance.p_visual_guidance import PStrikePhase, PVisualGuidance
+
+    g = PVisualGuidance()
+    g._z_int = 5.0
+    cmd = g.update(
+        None, (0.0, 0.0, 5.0), (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0), timestamp=10.0, dt=0.02, fresh=False,
+    )
+    assert cmd.phase == PStrikePhase.COAST
+    assert g._z_int == 0.0
+
+
+def test_hailo_configure_negotiates_auto_input_format(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    state = {"negotiated": None, "released": False}
+
+    class Input:
+        name = "input"
+        shape = (8, 8, 3)
+        is_nms = False
+
+        def __init__(self):
+            self.format = SimpleNamespace(type="AUTO")
+
+        def set_format_type(self, fmt):
+            self.format = SimpleNamespace(type=fmt)
+            state["negotiated"] = fmt
+
+    class Output:
+        name = "out0"
+        shape = (1, 1, 1)
+        is_nms = True
+        format = SimpleNamespace(type="FLOAT32")
+
+    class Bindings:
+        def input(self):
+            return SimpleNamespace(set_buffer=lambda buf: None)
+
+        def output(self, name):
+            return SimpleNamespace(set_buffer=lambda buf: None)
+
+    class Configured:
+        def activate(self):
+            pass
+
+        def create_bindings(self):
+            return Bindings()
+
+    class InferModel:
+        def __init__(self):
+            self._input = Input()
+            self._output = Output()
+
+        def set_batch_size(self, n):
+            pass
+
+        def input(self):
+            return self._input
+
+        @property
+        def outputs(self):
+            return [self._output]
+
+        def configure(self):
+            return Configured()
+
+    class VDevice:
+        def create_infer_model(self, hef):
+            return InferModel()
+
+        def release(self):
+            state["released"] = True
+
+    fake = types.ModuleType("hailo_platform")
+    fake.FormatType = SimpleNamespace(
+        UINT8="UINT8", FLOAT32="FLOAT32", AUTO="AUTO",
+    )
+    fake.VDevice = VDevice
+    monkeypatch.setitem(sys.modules, "hailo_platform", fake)
+
+    hef = tmp_path / "model.hef"
+    hef.write_bytes(b"fake")
+    from onboard.config import DetectorConfig
+    from onboard.detector.hailo import HailoDetector
+
+    det = HailoDetector(DetectorConfig(hef=str(hef)))
+    det._configure()
+    assert state["negotiated"] == "UINT8"
+    det._release()
+    assert state["released"] is True
+
+
+def test_run_returns_nonzero_if_worker_crashed_before_loop():
+    from onboard.app import OnboardApp
+    from onboard.config import AppConfig
+
+    app = OnboardApp(AppConfig())
+    app._start_with_retry = lambda: None
+    app.request_stop("thread_exception")
+    assert app.run() == 1
+
+
+def test_rc_mux_separate_override_switch_anchors_throttle_to_safe_hover():
+    from rc_mux import RCMux
+
+    class Msp:
+        def send_rc_16(self, channels):
+            self.last = tuple(channels)
+            return True
+
+    msp = Msp()
+    mux = RCMux(
+        msp,
+        mode_channel=7,
+        arm_channel=4,
+        base_throttle=1430,
+        override_channel=6,
+        override_range=(1300, 2100),
+        auto_engage=True,
+    )
+    mux._safe_hover_thr = 1430
+    # Mode=low first (C7), then mid.  ARM and OVERRIDE are high; ch[2] is the
+    # MSP echo (1500) and must not become the engaged throttle.
+    low = [1500, 1500, 1500, 1500, 1800, 1000, 1900, 1000]
+    mid = [1500, 1500, 1500, 1500, 1800, 1000, 1900, 1500]
+    mux._update_mode(low)
+    mux.request_auto(True)
+    mux._update_mode(mid)
+    assert mux._auto is True
+    assert mux.engaged_throttle == 1430
+
+
+def test_target_kf_rejects_nonfinite_measurement_without_poisoning_state():
+    from perception.target_kf import TargetKF
+
+    kf = TargetKF()
+    assert kf.update_position(np.array([0.0, 0.0, 5.0])) is True
+    before = kf.x.copy()
+    assert kf.update_position(np.array([np.nan, 1.0, 6.0])) is False
+    assert np.all(np.isfinite(kf.x))
+    assert np.allclose(kf.x, before)
+
+
+def test_visual_strike_pn_accel_points_toward_crossing_target():
+    from guidance.visual_strike_guidance import InterceptTrajectory
+
+    # Target is due north, crossing east.  A positive-x acceleration is the
+    # collision-course correction; the old relative-velocity sign inverted it.
+    st = InterceptTrajectory().update(
+        target_position_enu=np.array([0.0, 20.0, 5.0]),
+        target_velocity_enu=np.array([3.0, 0.0, 0.0]),
+        own_position_enu=np.array([0.0, 0.0, 5.0]),
+        own_velocity_enu=np.array([0.0, 6.0, 0.0]),
+    )
+    assert st.closing_speed_mps > 5.0
+    assert st.accel_pn_enu[0] > 0.0
+
+
+def test_msp_missing_throttle_defaults_to_idle():
+    from msp import decode_motor_channels
+
+    assert decode_motor_channels([])[:4] == (1500, 1500, 1000, 1500)
+    assert decode_motor_channels([1500, 1500])[:4] == (1500, 1500, 1000, 1500)

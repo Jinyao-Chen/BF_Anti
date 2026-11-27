@@ -2,10 +2,12 @@
 
 The Pi 5 has no battery-backed power path: pulling the flight pack while Linux
 is still writing the SD card can corrupt the filesystem.  This module is the
-software half of the shutdown procedure.  A pilot switch (CH7/AUX3 by default)
-is read from MSP_RC; when it is held high with the FC disarmed and throttle at
-idle, the runtime asks systemd to halt.  The pilot waits for the Pi activity
-LED to go out, then unplugs the pack.
+software half of the shutdown procedure.  When power.aux_channel is configured
+(e.g. CH7/AUX3 in the example profile), that pilot switch is read from MSP_RC;
+when it is held high with the FC disarmed and throttle at idle, the runtime
+asks systemd to halt.  The pilot waits for the Pi activity LED to go out, then
+unplugs the pack.  The code default is -1 (shutdown disabled) so a minimal
+config cannot halt the Pi by accident.
 
 Safety rules:
 * a low->high edge is required, so a switch left high at boot cannot shut the

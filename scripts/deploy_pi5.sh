@@ -4,6 +4,7 @@
 # Run from the laptop (the Pi must be reachable over SSH):
 #   bash scripts/deploy_pi5.sh
 #   PI_HOST=user@host PI_PASS='...' bash scripts/deploy_pi5.sh
+#   PI_USER=pi5 PI_HOST=ssh-alias PI_PREFIX=/home/pi5/BF_Anti bash scripts/deploy_pi5.sh
 #
 # It never edits WiFi, never flashes firmware, and never starts the motors.
 # The service is installed+enabled; pass --no-start to leave it stopped.
@@ -71,7 +72,16 @@ if run_ssh "test -x '$PREFIX/.venv/bin/python'"; then
 else
   VENV_FLAG=
 fi
-sudo_remote "bash '$PREFIX/scripts/pi5_install.sh' --no-apt --no-rsync --enable-service $VENV_FLAG"
+# PI_HOST may be an SSH alias (e.g. pi5-ip) rather than user@host, so do not
+# derive a username from it blindly.  The default matches the default prefix.
+BOARD_USER=${PI_USER:-}
+if [ -z "$BOARD_USER" ]; then
+  case "$PI_HOST" in
+    *@*) BOARD_USER=${PI_HOST%%@*} ;;
+    *)   BOARD_USER=pi5 ;;
+  esac
+fi
+sudo_remote "bash '$PREFIX/scripts/pi5_install.sh' --prefix '$PREFIX' --user '$BOARD_USER' --no-apt --no-rsync --enable-service $VENV_FLAG"
 
 say "5. service state"
 if [ "$START" -eq 1 ]; then

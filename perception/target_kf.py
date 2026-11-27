@@ -103,10 +103,12 @@ class TargetKF:
     def update_position(self, z: np.ndarray, variance: Optional[float] = None) -> bool:
         """位置测量（ENU, m）；返回 True 表示通过门控并完成更新。"""
         z = np.asarray(z, dtype=float)[:3]
+        r = float(self.meas_pos_var if variance is None else variance)
+        if not np.all(np.isfinite(z)) or not np.isfinite(r) or r <= 0.0:
+            return False
         if not self.initialized:
             self.reset(z)
             return True
-        r = float(self.meas_pos_var if variance is None else variance)
         H = np.zeros((3, 9))
         H[0:3, 0:3] = np.eye(3)
         y = z - H @ self.x
@@ -116,7 +118,7 @@ class TargetKF:
         except np.linalg.LinAlgError:
             return False
         d2 = float(y.T @ S_inv @ y)
-        if d2 > self.gate_chi2:
+        if not np.isfinite(d2) or d2 > self.gate_chi2:
             self.rejected += 1
             self._consec_rejected += 1
             if self._consec_rejected >= 5:

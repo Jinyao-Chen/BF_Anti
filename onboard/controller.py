@@ -29,7 +29,10 @@ from perception.bbox_tracker import BboxTracker
 
 
 def _clamp_rc(value: float) -> int:
-    return int(max(RC_MIN, min(RC_MAX, round(float(value)))))
+    v = float(value)
+    if not math.isfinite(v):
+        return RC_MID
+    return int(max(RC_MIN, min(RC_MAX, round(v))))
 
 
 def _slew(prev: int, target: int, limit: int) -> int:
@@ -54,7 +57,10 @@ class Controller:
             max_coast_s=getattr(cfg.detector, "max_coast_s", 0.25),
             gate_px=getattr(cfg.detector, "gate_px", 90.0),
             gate_frac=getattr(cfg.detector, "gate_frac", 0.15),
-            image_width=int(getattr(cfg.camera, "width", 1280)),
+            image_width=int(getattr(
+                getattr(self.guidance, "intrinsics", None), "width",
+                getattr(cfg.camera, "width", 1280),
+            )),
             gate_gain=getattr(cfg.detector, "gate_gain", 3.0),
             coast_vel_tau_s=getattr(cfg.detector, "coast_vel_tau_s", 0.24),
         )
@@ -142,7 +148,9 @@ class Controller:
         rc = getattr(state, "rc", None)
         if rc is not None and len(rc) >= 4:
             try:
-                self._prev_rpyt = tuple(int(rc[i]) for i in range(4))
+                vals = tuple(int(rc[i]) for i in range(4))
+                if all(RC_MIN <= v <= RC_MAX for v in vals):
+                    self._prev_rpyt = vals
             except (TypeError, ValueError):
                 pass
 
@@ -252,7 +260,10 @@ class Controller:
             track = self.tracker.update(None, dt=dt, timestamp=now)
 
         if track.fresh:
-            self._last_seen = now
+            # Use the detector timestamp, not the control-tick timestamp: the
+            # latter silently adds the full inference/transport age (up to
+            # max_det_age_s) to the COAST budget.
+            self._last_seen = float(det_t) if det_t > 0.0 else float(now)
             # When multiple candidates were associated, the tracker's selected
             # box (not necessarily the detector's highest-confidence box) is
             # the target used for the inertial LOS.
@@ -288,9 +299,15 @@ class Controller:
             return self._last_out
 
         self._had_lock = True
+        cam_lat = float(getattr(self.cfg.camera, "latency_s", 0.0) or 0.0)
         # Forward-predict once for guidance without feeding extrapolated pixels
-        # back into BboxTracker velocity estimation.
-        pred_age = (now - self._last_det_t) if self._last_det_t > 0.0 else det_age
+        # back into BboxTracker velocity estimation.  latency_s is an extra
+        # capture->sample delay not represented in detection.t; add it here so
+        # the box and the historical attitude use the same effective age.
+        pred_age = (
+            (now - self._last_det_t) + cam_lat
+            if self._last_det_t > 0.0 else (det_age + cam_lat)
+        )
         bbox_for_guid = self._predict_bbox(bbox, pred_age) if track.fresh else bbox
 
         # Use historical attitude interpolated at image capture time when available.
@@ -301,7 +318,6 @@ class Controller:
             and state_estimator is not None
             and hasattr(state_estimator, "attitude_at")
         ):
-            cam_lat = float(getattr(self.cfg.camera, "latency_s", 0.0) or 0.0)
             rpy_for_los = state_estimator.attitude_at(self._last_det_t - cam_lat)
 
         pos, vel = self._own_inputs(state)

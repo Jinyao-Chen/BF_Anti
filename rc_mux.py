@@ -39,13 +39,16 @@ class RCMux:
                  base_throttle=1100, crsf_timeout=0.5, cmd_timeout=0.5,
                  rate_hz=50, channel_source=None, rc_stale_timeout=0.5,
                  mode_channel=None, arm_channel=None,
-                 stick_takeover=True, auto_engage=True):
+                 stick_takeover=True, auto_engage=True,
+                 override_channel=None, override_range=None):
         self.msp = msp
         self.crsf = crsf
         self.switch_channel = switch_channel
         # Three-position mode switch (low=force manual, mid=auto, high=strike).
         # When set it supersedes the legacy two-position switch_channel.
         self.mode_channel = mode_channel
+        self.override_channel = override_channel
+        self.override_range = override_range
         self.arm_channel = arm_channel
         self.stick_takeover = bool(stick_takeover)
         self.auto_engage = bool(auto_engage)
@@ -103,6 +106,31 @@ class RCMux:
                 pass
         return raw > 1700
 
+    def _override_active(self, ch) -> bool:
+        """True when the FC's BOXMSPOVERRIDE range is currently active.
+
+        In the 3-position mode configuration the mode channel carries both the
+        pilot intent and the FC override range.  In the legacy separate-switch
+        configuration the override channel/range must be used instead; using
+        only mode_channel here silently samples MSP_RC echo values and
+        disables the safe level-attitude path.
+        """
+        if self.override_channel is not None:
+            idx = int(self.override_channel)
+            if not (0 <= idx < len(ch)):
+                # An explicitly configured override channel that is missing
+                # must fail closed, not silently fall back to the mode switch.
+                return False
+            raw = int(ch[idx])
+            if self.override_range is not None:
+                try:
+                    return bool(int(self.override_range[0]) <= raw
+                                <= int(self.override_range[1]))
+                except (TypeError, ValueError, IndexError):
+                    return False
+            return raw > 1700
+        return bool(self.mode_channel is not None and self._mode_pos > 0)
+
     def _safe_override_rpyt(self, ch):
         """Command when BOXMSPOVERRIDE is still on but AUTO is not active."""
         if not self._arm_active(ch):
@@ -146,7 +174,9 @@ class RCMux:
             self._thread.join(timeout=1.0)
         if park:
             try:
-                self.msp.set_rc(1500, 1500, 1000, 1500, 1500, 1500, 1500, 1500)
+                # AUX must be low, not 1500: a mode range that happens to span
+                # mid-stick (e.g. ANGLE/PREARM) must never activate on park.
+                self.msp.set_rc(1500, 1500, 1000, 1500, 1000, 1000, 1000, 1000)
             except Exception:
                 pass
 
@@ -204,11 +234,13 @@ class RCMux:
             self._update_mode(ch)
         else:
             self._update_switch(ch)
-        # Only sample pilot throttle when BOXMSPOVERRIDE is OFF (mode_pos == 0)
-        # so MSP_RC echo values never overwrite the safe hover reference.
-        override_active = (self.mode_channel is not None and self._mode_pos > 0)
+        # Only sample pilot throttle when BOXMSPOVERRIDE is OFF so MSP_RC echo
+        # values never overwrite the safe hover reference.
+        override_active = self._override_active(ch)
         arm_active = self._arm_active(ch)
-        if not override_active and arm_active:
+        if not arm_active:
+            self._safe_hover_thr = min(1700, int(self.base_throttle))
+        elif not override_active:
             # Never let a low/dropped pilot stick or a full-climb stick become
             # the fail-safe throttle.
             max_safe = min(1700, int(self.base_throttle) + 150)
@@ -254,6 +286,7 @@ class RCMux:
             self._switch_seen_low = False
             self._mode_seen_low = False
             self._mode_pos = 0
+            self._safe_hover_thr = min(1700, int(self.base_throttle))
             self._inhibit = True
             # On recovery, a switch already LOW has no falling edge; remember
             # to clear a latched safety fault when the pilot next visits LOW.
@@ -390,7 +423,7 @@ class RCMux:
 
     def _enter_auto(self, ch):
         self._auto = True
-        override_active = (self.mode_channel is not None and self._mode_pos > 0)
+        override_active = self._override_active(ch)
         # While BOXMSPOVERRIDE is active, MSP_RC echoes our own last frame;
         # anchor to the throttle sampled before override instead.
         self.engaged_throttle = (

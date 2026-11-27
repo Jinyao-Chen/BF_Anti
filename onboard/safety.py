@@ -129,12 +129,14 @@ class SafetySupervisor:
             return stale("loop_overrun")
         if c.min_battery_v > 0.0:
             max_age = float(getattr(c, "max_analog_age_s", 2.0))
-            if inp.battery_v <= 0.0 or inp.analog_age_s > max_age:
+            if not (inp.battery_v > 0.0) or not (inp.analog_age_s <= max_age):
+                self._low_batt_since = None
                 return self._deny("battery_telemetry_stale")
             if inp.battery_v < c.min_battery_v:
                 # Low pack on the bench is not a fault to latch; airborne it
                 # is.  Debounce is never permission to fly.
                 if not inp.armed:
+                    self._low_batt_since = None
                     return self._deny("battery_low")
                 if self.battery_debounce_s <= 0.0:
                     return self._critical("battery_low")
@@ -143,6 +145,8 @@ class SafetySupervisor:
                 if (float(inp.now) - self._low_batt_since) >= self.battery_debounce_s:
                     return self._critical("battery_low")
                 return self._deny("battery_low_pending")
+            else:
+                self._low_batt_since = None
         else:
             self._low_batt_since = None
 

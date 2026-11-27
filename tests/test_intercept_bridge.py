@@ -147,8 +147,8 @@ def test_rc_frame_mapping_scales_pitch_to_rc_range():
     target = [0.0, 1.5, 10.0]
     cmd, frame = bridge.step(_pose(own, target))
     assert cmd.phase == GuidancePhase.TERMINAL
-    # 1500 + (-44°) * (500/45) ≈ 1011
-    assert frame["pitch"] == pytest.approx(1011, abs=3)
+    # Betaflight pitch high = nose down: 1500 + (44°) * (500/45) ≈ 1989.
+    assert frame["pitch"] == pytest.approx(1989, abs=3)
     assert 1000 <= frame["throttle"] <= 2000
     assert frame["roll"] == 1500
     assert frame["yaw"] == 1500
