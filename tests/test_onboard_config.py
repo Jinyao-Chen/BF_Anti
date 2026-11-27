@@ -30,6 +30,7 @@ def test_example_config_loads_and_profile_overlays():
     assert cfg.guidance.params["max_pitch_down_deg"] == 50.0
     assert cfg.safety.min_altitude_m == 2.0
     assert cfg.control.att_mode == "rate"
+    assert cfg.safety.min_battery_v == pytest.approx(20.4)
     assert cfg.power.aux_channel == 6
     assert cfg.power.hold_s == 2.0
     assert cfg.power.require_disarmed is True

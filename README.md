@@ -33,6 +33,7 @@
 | NPU | AI HAT+ Hailo-8L 13 TOPS (HAILO8L) | 已实测，HailoRT 4.23.0 |
 | 相机 | USB UVC 1280x720 MJPG（05a3:9230） | 已实测约 25 fps；FOV/tilt 需按实机标定 |
 | 飞控 | Betaflight 4.5.3, S405 / OMNIBUSF4SD | USB /dev/ttyACM0；UART3 CRSF；msp_override_channels_mask=15；RATE/ACTUAL 600/600/300 |
+| 电池 | **6S LiPo** | min_battery_v=20.4 V（3.4 V/cell）；以实测分压和负载压降微调 |
 | 视频 | J7 复合视频 720x576i PAL -> 5.8G VTX -> 眼镜 | J7/fb0 已实测；眼镜目视需现场确认 |
 | 模型 | YOLOv8n 1-class drone -> Hailo HEF | HEF 已在 Pi5 parse/run；实测 infer p50 约 19.5 ms、detector 约 51 fps |
 

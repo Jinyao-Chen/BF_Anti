@@ -101,7 +101,7 @@
     "min_altitude_m": 2,
     "max_altitude_m": 60,
     "max_range_m": 80,
-    "min_battery_v": 0,
+    "min_battery_v": 20.4,
     "target_confirm_s": 0.1,
     "target_lost_s": 0.4,
     "lost_reset_s": 1.5,

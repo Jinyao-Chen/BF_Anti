@@ -211,7 +211,8 @@ class SafetyConfig:
     min_altitude_m: float = 2.0
     max_altitude_m: float = 60.0
     max_range_m: float = 80.0
-    min_battery_v: float = 0.0       # 0 disables; set per pack (e.g. 13.6 for 4S)
+    # 0 disables; the aircraft pack is 6S LiPo, so 20.4 V = 3.4 V/cell.
+    min_battery_v: float = 0.0
     target_confirm_s: float = 0.10
     target_lost_s: float = 0.40
     lost_reset_s: float = 1.5

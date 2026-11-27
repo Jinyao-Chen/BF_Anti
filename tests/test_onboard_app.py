@@ -124,6 +124,9 @@ def fresh_state(now):
         rc_t=now,
         status_t=now,
         link_t=now,
+        # Example/Pi configs now use the aircraft's 6S low-voltage gate.
+        voltage_v=25.2,
+        analog_t=now,
     )
 
 

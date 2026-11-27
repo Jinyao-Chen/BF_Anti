@@ -79,6 +79,7 @@ def test_safety_supervisor_catches_att_mode_mismatch():
         rc_age_s=0.01, att_age_s=0.01, alt_age_s=0.01, status_age_s=0.01,
         link_age_s=0.01, altitude_m=10.0, range_m=15.0, loop_dt_s=0.02,
         target_confirmed=True, target_age_s=0.02,
+        battery_v=25.2, analog_age_s=0.01,
         angle_mode_active=False, expected_att_mode="angle",
     )
     dec = sup.evaluate(inp)
