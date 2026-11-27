@@ -288,18 +288,21 @@ class MspLink:
                 pass
 
     # -- low-level IO ------------------------------------------------------
-    def _write_frame(self, frame: bytes) -> bool:
+    def _write_frame_gen(self, frame: bytes) -> Optional[int]:
         with self._write_lock:
             if not self._ensure_connected():
-                return False
+                return None
             gen = self._generation
             try:
                 self._transport.write(frame)
             except Exception as exc:
                 self._drop(exc, expected_gen=gen)
-                return False
+                return None
             self.tx_frames += 1
-            return True
+            return gen
+
+    def _write_frame(self, frame: bytes) -> bool:
+        return self._write_frame_gen(frame) is not None
 
     def send(self, frame: bytes) -> bool:
         """Write a pre-built MSP frame (bytes). Returns False on link failure."""
@@ -314,19 +317,27 @@ class MspLink:
             if self._parser_needs_reset:
                 self._parser.reset()
                 self._parser_needs_reset = False
-            if not self._write_frame(frame):
+            gen = self._write_frame_gen(frame)
+            if gen is None:
                 return None
-            # _write_frame may have just opened a new connection and set this
-            # flag after our pre-write reset.  Reset again before consuming
-            # the reply, still under _query_lock.
+            # If another writer dropped and reconnected after our write, abort
+            # rather than consuming the new connection's reset flag or timing
+            # out against a fresh transport that never saw our request.
+            if self._generation != gen:
+                return None
             if self._parser_needs_reset:
                 self._parser.reset()
                 self._parser_needs_reset = False
-            gen = self._generation
             if timeout_s <= 0.0:
                 return None
             deadline = time.monotonic() + timeout_s
             while True:
+                # The RC writer can reopen the transport concurrently.  Once
+                # the generation changes, this request was never sent on the
+                # new connection: abort instead of feeding its parser or
+                # waiting for a reply that cannot arrive.
+                if self._generation != gen:
+                    return None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
                     break
@@ -337,6 +348,8 @@ class MspLink:
                     return None
                 if not chunk:
                     continue
+                if self._generation != gen:
+                    return None
                 for reply in self._parser.feed(chunk):
                     self.rx_frames += 1
                     rx_now = time.monotonic()

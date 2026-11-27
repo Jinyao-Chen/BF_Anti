@@ -134,9 +134,10 @@ class FcStateEstimator:
 
     def _link_stamp(self, fallback):
         # SET_RAW_RC ACKs must not make a dead telemetry link look fresh.
-        stamp = float(getattr(self.link, "last_telem_rx_t", 0.0) or 0.0)
-        if stamp <= 0.0:
-            stamp = float(getattr(self.link, "last_rx_t", 0.0) or 0.0)
+        # When the link exposes last_telem_rx_t, never fall back to last_rx_t.
+        if hasattr(self.link, "last_telem_rx_t"):
+            return float(getattr(self.link, "last_telem_rx_t", 0.0) or 0.0)
+        stamp = float(getattr(self.link, "last_rx_t", 0.0) or 0.0)
         return stamp if stamp > 0.0 else float(fallback)
 
     # -- AUX / mode metadata ---------------------------------------------

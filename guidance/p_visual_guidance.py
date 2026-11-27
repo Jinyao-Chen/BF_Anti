@@ -672,7 +672,8 @@ class PVisualGuidance:
         lead_deg = 0.0
         e_lead_cmd = 0.0
         if (self.lead_gain > 0.0 and np.isfinite(range_est)
-                and range_est > max(self.terminal_range_m, self.lead_cutoff_m)
+                and term_w > 0.0
+                and (self.lead_cutoff_m <= 0.0 or range_est > self.lead_cutoff_m)
                 and v_horiz_proxy > self.velalign_min_speed):
             az_rad = float(np.deg2rad(az_los))
             v_own_perp = (float(own_vel[0]) * np.cos(az_rad)
@@ -692,7 +693,7 @@ class PVisualGuidance:
                 lead_deg *= term_w
                 # 角度 -> 归一化图像误差（小角近似，用 fx/cx 转换）
                 e_lead_cmd = (self.intrinsics.fx / max(self.intrinsics.cx, 1e-6)
-                              * float(np.tan(np.deg2rad(lead_deg))))
+                              * float(np.tan(np.deg2rad(_clamp(lead_deg, -85.0, 85.0)))))
 
         # -------------------------------------------------------------- #
         # P 律
@@ -775,7 +776,7 @@ class PVisualGuidance:
         # 偏置会出现几度的几何下垂误差。
         cos_roll = max(0.25, float(np.cos(np.deg2rad(roll_live))))
         tilt_eff_deg = float(np.rad2deg(np.arctan(
-            np.tan(np.deg2rad(self.camera_tilt_deg)) * cos_roll
+            np.tan(np.deg2rad(_clamp(self.camera_tilt_deg, -85.0, 85.0))) * cos_roll
         )))
         pitch_bias = el_los - tilt_eff_deg
         pitch_cmd = pitch_bias - self.kp_pitch * e_v_cmd - self._ei_pitch_deg
@@ -842,8 +843,9 @@ class PVisualGuidance:
         vz_limit = None
         if self.climb_along_los and np.isfinite(el_los):
             v_h = v_horiz_proxy
+            el_tan = float(np.tan(np.deg2rad(_clamp(el_los, -85.0, 85.0))))
             # 地板 3 m/s：起步阶段水平速度≈0，纯几何值会把爬升掐死（起飞都困难）
-            vz_limit = max(abs(v_h * np.tan(np.deg2rad(el_los))), 3.0) + self.climb_margin_mps
+            vz_limit = max(abs(v_h * el_tan), 3.0) + self.climb_margin_mps
         throttle = self._altitude_pwm_raw(z_own, float(own_vel[2]), z_target_est,
                                           vz_limit=vz_limit, vz_ref_mps=vz_ref_mps)
 
@@ -876,7 +878,8 @@ class PVisualGuidance:
 
         throttle = self._lift_ff_throttle(throttle, pitch_live, roll_live)
         if guard_strength > 0.0:
-            throttle = max(throttle, self.hover_pwm * guard_strength)
+            thr_floor = self.thr_min_pwm + guard_strength * (self.hover_pwm - self.thr_min_pwm)
+            throttle = max(throttle, thr_floor)
 
         thr_sat = throttle > self.thr_max_pwm or throttle < self.thr_min_pwm
         throttle = _clamp(throttle, self.thr_min_pwm, self.thr_max_pwm)
@@ -891,7 +894,7 @@ class PVisualGuidance:
         # 外推框会按速度持续放大，否则漏检时能凭外推伪造 HIT。
         closing_ratio = (float(self._last_cmd.closing_ratio)
                          if self._last_cmd is not None else 0.0)
-        if fresh:
+        if fresh and not clipped_x:
             if (self._last_s is not None and self._last_t is not None
                     and (float(timestamp) - self._last_t) > 1e-6):
                 closing_ratio = float(
@@ -902,13 +905,16 @@ class PVisualGuidance:
                 closing_ratio = 0.0
             self._last_s = float(s_px)
             self._last_t = float(timestamp)
-        if clipped_x:
+        elif clipped_x:
             closing_ratio = 0.0
 
         phase = PStrikePhase.TERMINAL if range_est <= self.terminal_range_m else PStrikePhase.TRACK
-        size_hit = (fresh and not clipped_x and range_est <= self.hit_range_m
-                    and closing_ratio > 0.0)
-        self._hit_count = self._hit_count + 1 if size_hit else 0
+        # Only update hit dwell on fresh measurements so extrapolated 50 Hz
+        # ticks between 15-20 Hz detections never reset _hit_count to 0.
+        if fresh:
+            size_hit = (not clipped_x and range_est <= self.hit_range_m
+                        and closing_ratio > 0.0)
+            self._hit_count = self._hit_count + 1 if size_hit else 0
         hit = self._hit_count >= self.hit_dwell
         if hit:
             phase = PStrikePhase.HIT
@@ -963,6 +969,9 @@ class PVisualGuidance:
         now = float(timestamp)
         if self._lost_since is None:
             self._lost_since = now
+            # Do not carry a stale visual-altitude integrator into COAST: it
+            # would command a climb from a target that is no longer visible.
+            self._z_int = 0.0
         lost_for = max(0.0, now - self._lost_since)
         self._last_s = None
         roll_now, pitch_now = 0.0, 0.0
@@ -991,10 +1000,13 @@ class PVisualGuidance:
             last = self._last_cmd
             if last is not None:
                 decay = float(np.exp(-lost_for / 0.35))
+                coast_pitch = float(last.pitch_cmd_deg) * decay
+                if z_own < self.min_alt_guard_m:
+                    coast_pitch = max(coast_pitch, -15.0)
                 return PStrikeCommand(
                     phase=PStrikePhase.COAST, valid=False, hit=False,
                     roll_cmd_deg=float(last.roll_cmd_deg) * decay,
-                    pitch_cmd_deg=float(last.pitch_cmd_deg) * decay,
+                    pitch_cmd_deg=coast_pitch,
                     pitch_bias_deg=float(last.pitch_bias_deg),
                     yaw_rate_dps=0.0,
                     throttle_pwm=throttle,

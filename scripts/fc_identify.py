@@ -116,9 +116,12 @@ def print_human(report):
           % (api.get("protocol"), api.get("major"), api.get("minor")))
     print("FC variant  : %s" % fw.get("variant"))
     version = fw.get("fc_version") or {}
-    print("FC version  : %s-%s.%s.%s (%s)"
-          % (version.get("year"), version.get("month"), version.get("patch"),
-             version.get("version_string")))
+    version_text = version.get("version_string")
+    if not version_text:
+        version_text = "%s.%s.%s" % (
+            version.get("year"), version.get("month"), version.get("patch"),
+        )
+    print("FC version  : %s" % version_text)
     board = fw.get("board") or {}
     print("Board       : %s (%s) hw=%s"
           % (board.get("board_identifier"), board.get("board_name"),

@@ -7,7 +7,7 @@
    scripts/pi5_install.sh to /etc/polkit-1/rules.d/50-bf-anti-poweroff.rules.
 */
 polkit.addRule(function(action, subject) {
-    if (subject.user == "pi5" &&
+    if (subject.user == "__BOARD_USER__" &&
         (action.id == "org.freedesktop.login1.power-off" ||
          action.id == "org.freedesktop.login1.power-off-multiple-sessions" ||
          action.id == "org.freedesktop.login1.power-off-ignore-inhibit")) {

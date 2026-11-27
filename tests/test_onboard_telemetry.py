@@ -202,11 +202,21 @@ def test_main_bootstraps_blackbox_and_file_log(tmp_path, monkeypatch):
 def test_main_records_config_error_on_disk(tmp_path, monkeypatch):
     from onboard import app as app_module
 
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # A real flight run that must survive a config typo / restart loop.
+    old_run = logs / "run_20260101-000000"
+    old_run.mkdir()
+    (old_run / "telemetry.csv").write_text("sentinel\n", encoding="utf-8")
+
     bad = tmp_path / "bad.json"
     bad.write_text("{ this is not json", encoding="utf-8")
-    rc = app_module.main(["--config", str(bad), "--log-dir", str(tmp_path / "logs")])
+    rc = app_module.main(["--config", str(bad), "--log-dir", str(logs)])
     assert rc == 2
-    runs = [p for p in (tmp_path / "logs").iterdir() if p.name.startswith("run_")]
+    # The config-error blackbox is isolated in its own subdirectory; it must
+    # not run TelemetryLog._prune_old_runs() over the real flight logs.
+    assert old_run.is_dir() and (old_run / "telemetry.csv").is_file()
+    runs = [p for p in (logs / "config_errors").iterdir() if p.name.startswith("run_")]
     assert len(runs) == 1
     events = read_events(runs[0] / "events.jsonl")
     assert any(event["event"] == "config_error" for event in events)

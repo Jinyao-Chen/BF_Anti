@@ -69,7 +69,11 @@ class FcConfig:
     # AETR layout: 0 roll, 1 pitch, 2 throttle, 3 yaw, 4 AUX1 ... 15 AUX12.
     aux_arm: int = 4
     aux_angle: int = 5
-    aux_override: int = 6
+    # The flight profile uses CH8 for both the 3-position mode and
+    # BOXMSPOVERRIDE, so the default is the same-channel layout.  A legacy
+    # separate override switch must set aux_override explicitly (e.g. 6) and
+    # override_from_mode=False.
+    aux_override: int = 7
     # Three-position pilot mode switch (AUX4 by default):
     #   low  (<1300) = FORCE MANUAL: companion never engages
     #   mid  (1300..1700) = AUTO: engage as soon as a target is confirmed
@@ -80,8 +84,10 @@ class FcConfig:
     # When true, the same three-position MODE channel also drives the FC's
     # BOXMSPOVERRIDE range: low = override off (physical CRSF bypass),
     # mid/high = override on (companion may command RPYT).  This makes the
-    # low position a hardware force-manual even if the Pi is dead.
-    override_from_mode: bool = False
+    # low position a hardware force-manual even if the Pi is dead.  This is
+    # the aircraft layout; set false only for a legacy separate override
+    # switch (aux_override must then be distinct from aux_engage).
+    override_from_mode: bool = True
     # Stick takeover is an extra abort in the legacy two-position path.  In
     # the three-position path the mode switch is the deliberate abort; leave
     # this false so AUTO can take over while the pilot is still manoeuvring.
@@ -102,7 +108,9 @@ class CameraConfig:
     rotate_deg: int = 0
     hfov_deg: float = 70.0
     vfov_deg: Optional[float] = None
-    tilt_deg: float = 44.0
+    # The aircraft camera is mounted at 40 deg; 44 deg belongs to the older
+    # Gazebo/sim camera.  A profile may still override this explicitly.
+    tilt_deg: float = 40.0
     yaw_offset_deg: float = 0.0
     # Brown-Conrady k1,k2,p1,p2,k3 from a chessboard calibration.  None keeps
     # the legacy pinhole model.
@@ -178,7 +186,15 @@ class GuidanceConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> "GuidanceConfig":
-        params = data.get("params", data) if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            raise ValueError("guidance must be an object")
+        if "params" in data:
+            extra = sorted(k for k in data.keys() if k != "params")
+            if extra:
+                raise ValueError(f"Unknown keys in guidance: {extra}")
+            params = data["params"]
+        else:
+            params = data
         if not isinstance(params, dict):
             raise ValueError("guidance.params must be an object")
         return cls(params=dict(params))
@@ -200,9 +216,9 @@ class SafetyConfig:
     target_lost_s: float = 0.40
     lost_reset_s: float = 1.5
     fault_latch: bool = True
-    # A single sagging battery sample must not latch FAULT.  0 = old
-    # single-sample behaviour; e.g. 1.0 requires 1 s below min_battery_v.
-    battery_debounce_s: float = 0.0
+    # A single sagging battery sample must not latch FAULT.  0 restores the
+    # old single-sample behaviour; 1.0 requires 1 s below min_battery_v.
+    battery_debounce_s: float = 1.0
     # Battery voltage older than this is treated as absent; 0 V is never
     # interpreted as a valid pack voltage.
     max_analog_age_s: float = 2.0
@@ -247,8 +263,8 @@ class ControlConfig:
     rc_rate_limit: int = 60
     # 0 keeps the legacy per-tick limit; >0 is the physical slew limit in
     # RC-units/second, independent of control rate (e.g. 1200 = 500 units in
-    # 0.42 s).  Profiles for the real aircraft should set this.
-    rc_slew_rate_per_s: float = 0.0
+    # 0.42 s).  The old default (0) coupled the limit to control rate.
+    rc_slew_rate_per_s: float = 1200.0
     roll_sign: float = 1.0
     pitch_sign: float = 1.0
     yaw_sign: float = 1.0
@@ -390,9 +406,13 @@ class AppConfig:
             raise ValueError("throttle_min must be < throttle_max")
         if not (self.control.throttle_min <= self.control.hover_throttle <= self.control.throttle_max):
             raise ValueError("hover_throttle must be within throttle limits")
-        aux = [self.fc.aux_arm, self.fc.aux_angle, self.fc.aux_override, self.fc.aux_engage]
-        if any(not (0 <= a <= 15) for a in aux):
-            raise ValueError("AUX channel indices must be in [0, 15]")
+        active_aux = (
+            [self.fc.aux_arm, self.fc.aux_angle, self.fc.aux_engage]
+            if self.fc.override_from_mode
+            else [self.fc.aux_arm, self.fc.aux_angle, self.fc.aux_override, self.fc.aux_engage]
+        )
+        if any(not (4 <= a <= 15) for a in active_aux):
+            raise ValueError("AUX channel indices must be in [4, 15]")
         if self.fc.aux_arm == self.fc.aux_angle:
             raise ValueError("aux_arm and aux_angle must be distinct")
         if self.fc.override_from_mode:
@@ -401,11 +421,12 @@ class AppConfig:
                 raise ValueError("aux_arm and aux_engage must be distinct")
             if self.fc.aux_angle == self.fc.aux_engage:
                 raise ValueError("aux_angle and aux_engage must be distinct")
-        elif len(set(aux)) != len(aux):
+        elif len(set(active_aux)) != len(active_aux):
             raise ValueError("aux_arm/angle/override/engage must be distinct")
-        if not (-1 <= int(self.power.aux_channel) <= 15):
-            raise ValueError("power.aux_channel must be -1 or in [0, 15]")
-        if int(self.power.aux_channel) >= 0 and int(self.power.aux_channel) in set(aux):
+        pwr_ch = int(self.power.aux_channel)
+        if pwr_ch != -1 and not (4 <= pwr_ch <= 15):
+            raise ValueError("power.aux_channel must be -1 or in [4, 15]")
+        if pwr_ch >= 0 and pwr_ch in set(active_aux):
             raise ValueError("power.aux_channel must differ from the flight AUX channels")
         if self.power.hold_s <= 0.0:
             raise ValueError("power.hold_s must be positive")
@@ -485,7 +506,18 @@ class AppConfig:
         params.setdefault("angle_limit_deg", float(self.control.angle_limit_deg))
         params.setdefault("yaw_full_rate_dps", float(self.control.yaw_full_rate_dps))
         params.setdefault("camera_yaw_offset_deg", float(self.camera.yaw_offset_deg))
-        params.setdefault("camera_dist_coeffs", self.camera.dist_coeffs)
+        dist = self.camera.dist_coeffs
+        if dist is not None and len(dist) >= 4 and rotate in (90, 180, 270):
+            d = list(dist)
+            p1, p2 = float(d[2]), float(d[3])
+            if rotate == 180:
+                d[2], d[3] = -p1, -p2
+            elif rotate == 90:
+                d[2], d[3] = p2, -p1
+            elif rotate == 270:
+                d[2], d[3] = -p2, p1
+            dist = tuple(d)
+        params.setdefault("camera_dist_coeffs", dist)
         return PVisualGuidance(**params)
 
 

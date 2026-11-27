@@ -348,6 +348,8 @@ class ReplayDetector:
         self._played = 0
         self._last_det_t = 0.0
         self._last_detection: Optional[Detection] = None
+        self._last_frame_detections: Optional[list[Detection]] = None
+        self._last_latest_now: Optional[float] = None
         self._finished = False
 
     # -- lifecycle -------------------------------------------------------
@@ -358,6 +360,8 @@ class ReplayDetector:
             self._played = 0
             self._finished = False
             self._t0 = self._clock()
+            self._last_frame_detections = None
+            self._last_latest_now = None
 
     def stop(self) -> None:
         with self._lock:
@@ -423,6 +427,8 @@ class ReplayDetector:
             index = self._current_index(now)
             detections = self._stamped(index, now)
             self._played += 1
+            self._last_frame_detections = list(detections)
+            self._last_latest_now = now
             best: Optional[Detection] = None
             if detections:
                 best = max(detections, key=lambda det: det.conf)
@@ -446,9 +452,18 @@ class ReplayDetector:
             self.start()
         now = self._clock() if now is None else float(now)
         with self._lock:
-            index = self._current_index(now)
-            detections = self._stamped(index, now)
-            self._played += 1
+            if (
+                self._last_frame_detections is not None
+                and self._last_latest_now is not None
+                and abs(now - self._last_latest_now) <= 1e-9
+            ):
+                detections = list(self._last_frame_detections)
+            else:
+                index = self._current_index(now)
+                detections = self._stamped(index, now)
+                self._played += 1
+                self._last_frame_detections = list(detections)
+                self._last_latest_now = now
         if max_age_s is not None and float(max_age_s) > 0.0:
             detections = [d for d in detections if (now - d.t) <= float(max_age_s)]
         return detections

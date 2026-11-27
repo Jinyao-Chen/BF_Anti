@@ -189,3 +189,10 @@ def test_bench_toggle_arms_and_disarms():
     assert mux.bench_toggle() is False
     mux._tick(10.7)
     assert msp.calls[-1] == (1500, 1500, 1000, 1500, 1500, 1500, 1500, 1500)
+
+
+def test_park_sends_low_aux_not_mid_stick():
+    msp = FakeMSP()
+    mux = RCMux(msp, crsf=None, base_throttle=1100)
+    mux.stop(park=True)
+    assert msp.calls[-1] == (1500, 1500, 1000, 1500, 1000, 1000, 1000, 1000)

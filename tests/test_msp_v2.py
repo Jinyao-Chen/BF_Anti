@@ -181,12 +181,12 @@ def test_link_send_rc_16_wire_payload_and_set_rc_compat():
     assert len(frames[0].payload) == 32
     assert list(struct.unpack("<16H", frames[0].payload)) == channels
 
-    # 8-arg compatibility path pads channels 9..16 to neutral.
+    # 8-arg compatibility path pads missing AUX channels 9..16 to low (1000).
     assert link.set_rc(1500, 1400, 1200, 1300, 1000, 1100, 1100, 1000) is True
     frames = FrameParser().feed(transport.written[-1])
     values = list(struct.unpack("<16H", frames[0].payload))
     assert values[:8] == [1500, 1400, 1200, 1300, 1000, 1100, 1100, 1000]
-    assert values[8:] == [1500] * 8
+    assert values[8:] == [1000] * 8
     link.close()
 
 

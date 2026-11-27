@@ -53,6 +53,24 @@ def test_jsonl_playback_and_best_detection(tmp_path):
     assert fourth is not None and fourth.conf == pytest.approx(0.9)
 
 
+def test_latest_and_latest_detections_share_one_frame_per_tick(tmp_path):
+    path = write_jsonl(tmp_path / "flight.jsonl", FRAMES)
+    det = ReplayDetector(cfg(path), realtime=False)
+    det.start()
+    first = det.latest(1.0, now=100.0)
+    assert first is not None and first.conf == pytest.approx(0.9)
+    # The paired call in app.step_once() must not consume a second frame.
+    pairs = det.latest_detections(1.0, now=100.0)
+    assert len(pairs) == 2
+    second = det.latest(1.0, now=100.02)
+    assert second is not None and second.conf == pytest.approx(0.6)
+    pairs = det.latest_detections(1.0, now=100.02)
+    assert len(pairs) == 1
+    assert pairs[0].conf == pytest.approx(0.6)
+    # A subsequent tick advances exactly once again.
+    assert det.latest(1.0, now=100.04) is None
+
+
 def test_jsonl_latest_detections_returns_all(tmp_path):
     path = write_jsonl(tmp_path / "two.jsonl", [FRAMES[0]])
     det = ReplayDetector(cfg(path), realtime=False)

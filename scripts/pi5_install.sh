@@ -232,9 +232,6 @@ if [ "$DO_VENV" -eq 1 ]; then
     ok "venv already present: $VENV"
   else
     run python3 -m venv --system-site-packages "$VENV"
-    if [ "$IS_ROOT" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
-      run chown -R "$BOARD_USER:$BOARD_USER" "$VENV"
-    fi
   fi
   if [ "$DRY_RUN" -eq 0 ] && [ -x "$VENV/bin/pip" ]; then
     quiet "pip upgrade" "$VENV/bin/pip" install --upgrade pip
@@ -249,6 +246,9 @@ if [ "$DO_VENV" -eq 1 ]; then
     else
       warn "venv cannot import hailo_platform (install python3-hailort system-wide)"
     fi
+  fi
+  if [ "$IS_ROOT" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] && [ -d "$VENV" ]; then
+    run chown -R "$BOARD_USER:$BOARD_USER" "$VENV"
   fi
 else
   info "venv step skipped"
@@ -299,6 +299,12 @@ if [ "$DO_SERVICE" -eq 1 ]; then
     install -d -m 0755 /etc/polkit-1/rules.d
     TMP_RULE=$(mktemp)
     sed "s|__BOARD_USER__|$BOARD_USER|g" "$POLKIT_RULE_SRC" > "$TMP_RULE"
+    if grep -Fq '__BOARD_USER__' "$TMP_RULE" ||
+       ! grep -Fq "subject.user == \"$BOARD_USER\"" "$TMP_RULE"; then
+      rm -f "$TMP_RULE"
+      printf 'error: polkit rule for %s was not rendered correctly\n' "$BOARD_USER" >&2
+      exit 1
+    fi
     install -m 0644 -o root -g root "$TMP_RULE" "$POLKIT_RULE_DST"
     rm -f "$TMP_RULE"
     # Membership takes effect on next login; the unit's SupplementaryGroups

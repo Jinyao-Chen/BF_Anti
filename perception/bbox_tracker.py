@@ -123,17 +123,6 @@ class BboxTracker:
         return int(self._miss)
 
     # ------------------------------------------------------------------ #
-    def _gate_now(self) -> float:
-        if self.max_coast_s > 0.0:
-            growth = 1.0 + min(1.0, self._miss_s / max(0.05, self.max_coast_s))
-        else:
-            growth = 1.0 + 0.15 * self._miss
-        base = max(self.gate_px, self.gate_frac * float(self.image_width))
-        return max(
-            base * growth,
-            self.gate_gain * math.hypot(self._v[0], self._v[1]) * self._dt * max(1, self._miss + 1),
-        )
-
     def update_candidates(self, candidates, dt: float = 1.0,
                           timestamp: Optional[float] = None) -> TrackOut:
         """Associate *all* detector boxes with the predicted target.
@@ -159,14 +148,13 @@ class BboxTracker:
             return self.update(max(boxes, key=lambda item: item[1])[0],
                                dt=dt, timestamp=timestamp)
         px, py = self._predicted_center()
-        gate = self._gate_now()
         def _distance(item):
             box = item[0]
             return math.hypot((box[0] + box[2]) * 0.5 - px,
                               (box[1] + box[3]) * 0.5 - py)
         nearest = min(boxes, key=lambda item: (_distance(item), -item[1]))
-        if _distance(nearest) > gate:
-            return self.update(None, dt=dt, timestamp=timestamp)
+        # Always delegate to update() so an all-out-of-gate frame reports
+        # "gated" and re-initialises once the coast window expires.
         return self.update(nearest[0], dt=dt, timestamp=timestamp)
 
     def update(self, det: Optional[BBox], dt: float = 1.0,

@@ -129,7 +129,15 @@ class AuxDiscovery:
     def rx_map_is_aetr(self) -> Optional[bool]:
         if self.rx_map is None:
             return None
-        return tuple(self.rx_map[:4]) == (0, 1, 3, 2)
+        mapping = tuple(self.rx_map)
+        if mapping[:4] != (0, 1, 3, 2):
+            return False
+        # Newer firmware reports all eight mappable inputs.  A, E, T, R alone
+        # is not enough: a swapped AUX1..AUX4 would silently reinterpret the
+        # ARM/ANGLE/OVERRIDE switches.
+        if len(mapping) >= 8:
+            return mapping[:8] == (0, 1, 3, 2, 4, 5, 6, 7)
+        return True
 
     def to_dict(self):
         return {

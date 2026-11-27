@@ -147,3 +147,29 @@ def test_build_guidance_wires_optional_distortion(tmp_path):
     cfg = load_config(str(p))
     g = cfg.build_guidance()
     assert g.intrinsics.dist_coeffs == pytest.approx((-0.25, 0.05, 0.001, -0.002, 0.0))
+
+
+@pytest.mark.parametrize(
+    "rotate, expected, expected_width",
+    [
+        (90, (-0.002, -0.001), 720),
+        (180, (-0.001, 0.002), 1280),
+        (270, (0.002, 0.001), 720),
+    ],
+)
+def test_rotated_camera_rotates_tangential_distortion(
+    tmp_path, rotate, expected, expected_width,
+):
+    raw = json.load(open(EXAMPLE, encoding="utf-8"))
+    raw["camera"]["rotate_deg"] = rotate
+    # k1,k2,p1,p2,k3
+    raw["camera"]["dist_coeffs"] = [-0.25, 0.05, 0.001, -0.002, 0.0]
+    p = _write_test_config(tmp_path, raw, "dist-rot.json")
+    cfg = load_config(str(p))
+    g = cfg.build_guidance()
+    assert g.intrinsics.dist_coeffs[2:4] == pytest.approx(expected)
+    # The rotated image width, not the pre-rotation capture width, sets the
+    # tracker association gate.
+    from onboard.controller import Controller
+    ctrl = Controller(cfg)
+    assert ctrl.tracker.image_width == expected_width

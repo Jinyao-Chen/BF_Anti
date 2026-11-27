@@ -223,7 +223,10 @@ class InterceptBridge:
             pose.timestamp,
         )
         track = guidance_to_track_cmd(
-            cmd, max_angle_deg=self.max_angle_deg, timestamp=pose.timestamp
+            cmd,
+            max_angle_deg=self.max_angle_deg,
+            timestamp=pose.timestamp,
+            own_yaw_deg=pose.own_rpy_deg[2],
         )
         frame = {
             "roll": track.roll,

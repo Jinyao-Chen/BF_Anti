@@ -54,7 +54,11 @@ def _wrap180(angle_deg: float) -> float:
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
-    return max(float(lo), min(float(hi), float(value)))
+    v = float(value)
+    lo_f, hi_f = float(lo), float(hi)
+    if not np.isfinite(v):
+        return 0.0 if (lo_f <= 0.0 <= hi_f) else lo_f
+    return max(lo_f, min(hi_f, v))
 
 
 @dataclass
@@ -143,7 +147,7 @@ class InterceptTrajectory:
             )
 
         los = rel / rng
-        v_rel = own_vel - target_vel  # 自己相对目标
+        v_rel = target_vel - own_vel  # 目标相对本机 (dr/dt)
         closing = float(-np.dot(los, v_rel))
         closing_eff = max(closing, self.min_closing_speed_mps)
         t_go = min(rng / max(closing_eff, 1e-6), self.max_lead_time_s)
@@ -399,7 +403,8 @@ class VisualStrikeGuidance:
         pitch_err = el_ref - el_meas
         # 前馈角速率来自参考点图像速度，经相机焦距近似成视线角速率。
         yaw_rate_ff = np.rad2deg(np.arctan2(du_ref, self.intrinsics.fx))
-        pitch_rate_ff = np.rad2deg(np.arctan2(dv_ref, self.intrinsics.fy))
+        # Image v increases downward -> dv_ref > 0 means lower elevation (pitch down).
+        pitch_rate_ff = -np.rad2deg(np.arctan2(dv_ref, self.intrinsics.fy))
 
         yaw_rate_cmd = self.yaw_error_gain * yaw_err + yaw_rate_ff
         pitch_rate_cmd = self.pitch_error_gain * pitch_err + pitch_rate_ff
