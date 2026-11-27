@@ -48,7 +48,9 @@ ExecStart=__INSTALL_DIR__/scripts/pi5_run_onboard.sh
 Restart=on-failure
 RestartSec=2
 TimeoutStartSec=20
-TimeoutStopSec=20
+# RC shutdown can spend up to 3 x 5 s in poweroff attempts after component
+# joins; 20 s was tight enough for systemd to SIGKILL before the last attempt.
+TimeoutStopSec=40
 KillSignal=SIGTERM
 
 # Light hardening; the runtime still needs /dev/fb0, /dev/hailo0,
