@@ -133,7 +133,8 @@ step "2. OS packages"
 if [ "$DO_APT" -eq 1 ]; then
   run apt-get update
   run env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    python3-venv python3-pip python3-opencv python3-serial v4l-utils libdrm-tests rsync
+    python3-venv python3-pip python3-opencv python3-serial v4l-utils libdrm-tests rsync \
+    fake-hwclock
 else
   info "apt step skipped"
 fi
